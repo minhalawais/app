@@ -1,0 +1,290 @@
+from app import db
+from app.models import ISPPayment, ISP, BankAccount, User
+from app.utils.logging_utils import log_action
+import uuid
+import logging
+import os
+from werkzeug.utils import secure_filename
+
+logger = logging.getLogger(__name__)
+
+class ISPPaymentError(Exception):
+    """Custom exception for ISP payment operations"""
+    pass
+
+def get_all_isp_payments(company_id, user_role, employee_id):
+    try:
+        if user_role == 'super_admin':
+            payments = ISPPayment.query.all()
+        elif user_role == 'auditor':
+            payments = ISPPayment.query.filter_by(is_active=True, company_id=company_id).all()
+        elif user_role == 'company_owner':
+            payments = ISPPayment.query.filter_by(company_id=company_id).all()
+        elif user_role == 'employee':
+            payments = ISPPayment.query.filter_by(processed_by=employee_id).all()
+        else:
+            payments = []
+
+        result = []
+        for payment in payments:
+            try:
+                result.append({
+                    'id': str(payment.id),
+                    'isp_id': str(payment.isp_id),
+                    'isp_name': payment.isp.name,
+                    'bank_account_id': str(payment.bank_account_id),
+                    'bank_account_details': f"{payment.bank_account.bank_name} - {payment.bank_account.account_number}",
+                    'payment_type': payment.payment_type,
+                    'reference_number': payment.reference_number,
+                    'description': payment.description,
+                    'amount': float(payment.amount),
+                    'payment_date': payment.payment_date.isoformat(),
+                    'billing_period': payment.billing_period,
+                    'bandwidth_usage_gb': payment.bandwidth_usage_gb,
+                    'payment_method': payment.payment_method,
+                    'transaction_id': payment.transaction_id,
+                    'status': payment.status,
+                    'payment_proof': payment.payment_proof,
+                    'processed_by': str(payment.processed_by),
+                    'processor_name': f"{payment.processor.first_name} {payment.processor.last_name}",
+                    'is_active': payment.is_active,
+                    'created_at': payment.created_at.isoformat() if payment.created_at else None,
+                })
+            except AttributeError as e:
+                logger.error(f"Error processing ISP payment {payment.id}: {str(e)}")
+                continue
+        return result
+    except Exception as e:
+        logger.error(f"Error getting ISP payments: {str(e)}")
+        raise ISPPaymentError("Failed to retrieve ISP payments")
+
+def add_isp_payment(data, user_role, current_user_id, ip_address, user_agent):
+    try:
+        # Validate required fields
+        required_fields = ['company_id', 'isp_id', 'bank_account_id', 'payment_type', 
+                         'amount', 'payment_date', 'billing_period',
+                         'payment_method', 'processed_by']
+        for field in required_fields:
+            if field not in data:
+                raise ValueError(f"Missing required field: {field}")
+
+        UPLOAD_FOLDER = 'uploads/isp_payment_proofs'
+        os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+        # Create new payment
+        new_payment = ISPPayment(
+            company_id=uuid.UUID(data['company_id']),
+            isp_id=uuid.UUID(data['isp_id']),
+            bank_account_id=uuid.UUID(data['bank_account_id']),
+            payment_type=data['payment_type'],
+            reference_number=data.get('reference_number'),
+            description=data.get('description', ''),  # Make description optional
+            amount=float(data['amount']),
+            payment_date=data['payment_date'],
+            billing_period=data['billing_period'],
+            bandwidth_usage_gb=float(data['bandwidth_usage_gb']) if data.get('bandwidth_usage_gb') else None,  # Make bandwidth optional
+            payment_method=data['payment_method'],
+            transaction_id=data.get('transaction_id'),
+            status=data.get('status', 'completed'),
+            processed_by=uuid.UUID(data['processed_by']),
+            is_active=True
+        )
+
+        # Handle payment proof
+        if 'payment_proof' in data and data['payment_proof']:
+            new_payment.payment_proof = data['payment_proof']
+
+        db.session.add(new_payment)
+        db.session.commit()
+
+        log_action(
+            current_user_id,
+            'CREATE',
+            'isp_payments',
+            new_payment.id,
+            None,
+            {k: v for k, v in data.items() if k != 'payment_proof'},
+            ip_address,
+            user_agent,
+            uuid.UUID(data['company_id'])
+        )
+
+        return new_payment
+    except ValueError as e:
+        logger.error(f"Validation error: {str(e)}")
+        raise ISPPaymentError(str(e))
+    except Exception as e:
+        logger.error(f"Error adding ISP payment: {str(e)}")
+        db.session.rollback()
+        raise ISPPaymentError("Failed to create ISP payment")
+
+def update_isp_payment(id, data, company_id, user_role, current_user_id, ip_address, user_agent):
+    try:
+        if user_role == 'super_admin':
+            payment = ISPPayment.query.get(id)
+        elif user_role == 'auditor':
+            payment = ISPPayment.query.filter_by(id=id, is_active=True, company_id=company_id).first()
+        elif user_role == 'company_owner':
+            payment = ISPPayment.query.filter_by(id=id, company_id=company_id).first()
+        else:
+            payment = None
+
+        if not payment:
+            raise ValueError(f"ISP payment with id {id} not found")
+
+        old_values = {
+            'isp_id': str(payment.isp_id),
+            'bank_account_id': str(payment.bank_account_id),
+            'payment_type': payment.payment_type,
+            'reference_number': payment.reference_number,
+            'description': payment.description,
+            'amount': float(payment.amount),
+            'payment_date': payment.payment_date.isoformat(),
+            'billing_period': payment.billing_period,
+            'bandwidth_usage_gb': payment.bandwidth_usage_gb,
+            'payment_method': payment.payment_method,
+            'transaction_id': payment.transaction_id,
+            'status': payment.status,
+            'payment_proof': payment.payment_proof,
+            'processed_by': str(payment.processed_by),
+            'is_active': payment.is_active
+        }
+
+        # Update fields
+        update_fields = [
+            'isp_id', 'bank_account_id', 'payment_type', 'reference_number',
+            'description', 'amount', 'payment_date', 'billing_period',
+            'bandwidth_usage_gb', 'payment_method', 'transaction_id',
+            'status', 'processed_by', 'is_active'
+        ]
+
+        for field in update_fields:
+            if field in data:
+                if field in ['isp_id', 'bank_account_id', 'processed_by']:
+                    setattr(payment, field, uuid.UUID(data[field]))
+                elif field in ['amount']:
+                    setattr(payment, field, float(data[field]))
+                elif field == 'bandwidth_usage_gb' and data[field]:
+                    setattr(payment, field, float(data[field]))
+                else:
+                    setattr(payment, field, data[field])
+
+        # Handle payment proof update
+        if 'payment_proof' in data:
+            try:
+                # Delete old file if it exists
+                if payment.payment_proof and os.path.exists(payment.payment_proof):
+                    os.remove(payment.payment_proof)
+                
+                file = data['payment_proof']
+                filename = secure_filename(file.filename)
+                file_path = os.path.join(UPLOAD_FOLDER, filename)
+                file.save(file_path)
+                payment.payment_proof = file_path
+            except Exception as e:
+                logger.error(f"Error updating payment proof: {str(e)}")
+                raise ISPPaymentError("Failed to update payment proof")
+
+        db.session.commit()
+
+        log_action(
+            current_user_id,
+            'UPDATE',
+            'isp_payments',
+            payment.id,
+            old_values,
+            {k: v for k, v in data.items() if k != 'payment_proof'},
+            ip_address,
+            user_agent,
+            company_id
+        )
+
+        return payment
+    except ValueError as e:
+        logger.error(f"Validation error: {str(e)}")
+        raise ISPPaymentError(str(e))
+    except Exception as e:
+        logger.error(f"Error updating ISP payment {id}: {str(e)}")
+        db.session.rollback()
+        raise ISPPaymentError("Failed to update ISP payment")
+
+def delete_isp_payment(id, company_id, user_role, current_user_id, ip_address, user_agent):
+    try:
+        if user_role == 'super_admin':
+            payment = ISPPayment.query.get(id)
+        elif user_role == 'auditor':
+            payment = ISPPayment.query.filter_by(id=id, is_active=True, company_id=company_id).first()
+        elif user_role == 'company_owner':
+            payment = ISPPayment.query.filter_by(id=id, company_id=company_id).first()
+        else:
+            payment = None
+
+        if not payment:
+            raise ValueError(f"ISP payment with id {id} not found")
+
+        old_values = {
+            'isp_id': str(payment.isp_id),
+            'bank_account_id': str(payment.bank_account_id),
+            'payment_type': payment.payment_type,
+            'reference_number': payment.reference_number,
+            'description': payment.description,
+            'amount': float(payment.amount),
+            'payment_date': payment.payment_date.isoformat(),
+            'billing_period': payment.billing_period,
+            'bandwidth_usage_gb': payment.bandwidth_usage_gb,
+            'payment_method': payment.payment_method,
+            'transaction_id': payment.transaction_id,
+            'status': payment.status,
+            'payment_proof': payment.payment_proof,
+            'processed_by': str(payment.processed_by),
+            'is_active': payment.is_active
+        }
+
+        # Delete payment proof file if it exists
+        if payment.payment_proof and os.path.exists(payment.payment_proof):
+            try:
+                os.remove(payment.payment_proof)
+            except OSError as e:
+                logger.error(f"Error deleting payment proof file: {str(e)}")
+
+        db.session.delete(payment)
+        db.session.commit()
+
+        log_action(
+            current_user_id,
+            'DELETE',
+            'isp_payments',
+            payment.id,
+            old_values,
+            None,
+            ip_address,
+            user_agent,
+            company_id
+        )
+
+        return True
+    except ValueError as e:
+        logger.error(f"Validation error: {str(e)}")
+        raise ISPPaymentError(str(e))
+    except Exception as e:
+        logger.error(f"Error deleting ISP payment {id}: {str(e)}")
+        db.session.rollback()
+        raise ISPPaymentError("Failed to delete ISP payment")
+
+def get_isp_payment_proof(payment_id, company_id):
+    try:
+        payment = ISPPayment.query.filter_by(id=payment_id, company_id=company_id).first()
+        if not payment:
+            raise ValueError("ISP payment not found")
+
+        payment_proof_details = {
+            'payment_id': str(payment.id),
+            'proof_of_payment': payment.payment_proof
+        }
+        return payment_proof_details
+    except ValueError as validation_error:
+        logger.error(f"Validation error: {str(validation_error)}")
+        raise ISPPaymentError(str(validation_error))
+    except Exception as general_error:
+        logger.error(f"Unexpected error while retrieving payment proof: {str(general_error)}")
+        raise ISPPaymentError("Unable to retrieve the payment proof")
