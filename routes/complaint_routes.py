@@ -7,7 +7,8 @@ from ..crud import complaint_crud,customer_crud
 from werkzeug.utils import secure_filename
 import os
 
-UPLOAD_FOLDER = os.path.join(current_app.root_path, 'uploads/complaints')
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+UPLOAD_FOLDER = os.path.join(PROJECT_ROOT, 'uploads', 'complaints')
 ALLOWED_EXTENSIONS = {'pdf', 'png', 'jpg', 'jpeg', 'gif'}
 
 def allowed_file(filename):

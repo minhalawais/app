@@ -1,12 +1,12 @@
 from app import db
-from app.models import Invoice, Customer, Payment
+from app.models import Invoice, Customer, Payment, ServicePlan
 from app.utils.logging_utils import log_action
 import uuid
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError, DatabaseError
-from datetime import datetime
 import logging
 from sqlalchemy.orm import joinedload
-
+from datetime import datetime, timedelta
+from sqlalchemy import and_, or_
 logger = logging.getLogger(__name__)
 
 class InvoiceError(Exception):
@@ -164,8 +164,16 @@ def update_invoice(id, data, company_id, user_role, current_user_id, ip_address,
         log_data = data.copy()
         date_fields = ['billing_start_date', 'billing_end_date', 'due_date']
         for field in date_fields:
-            if field in log_data and isinstance(log_data[field], datetime):
-                log_data[field] = log_data[field].isoformat()
+            if field in log_data:
+                try:
+                    # Handle both string and datetime objects
+                    if isinstance(log_data[field], str):
+                        parsed_date = datetime.fromisoformat(log_data[field].rstrip('Z'))
+                        log_data[field] = parsed_date.isoformat()
+                    elif isinstance(log_data[field], datetime):
+                        log_data[field] = log_data[field].isoformat()
+                except ValueError:
+                    raise ValueError(f"Invalid date format for {field}")
 
         # Validate UUID fields
         if 'customer_id' in data:
@@ -189,6 +197,13 @@ def update_invoice(id, data, company_id, user_role, current_user_id, ip_address,
         
         for field in fields_to_update:
             if field in data:
+                # Handle date fields
+                if field in date_fields and isinstance(data[field], str):
+                    try:
+                        data[field] = datetime.fromisoformat(data[field].rstrip('Z'))
+                    except ValueError:
+                        raise ValueError(f"Invalid date format for {field}")
+                
                 setattr(invoice, field, data[field])
 
         db.session.commit()
@@ -199,7 +214,7 @@ def update_invoice(id, data, company_id, user_role, current_user_id, ip_address,
             'invoices',
             invoice.id,
             old_values,
-            log_data,  # Use the modified data with string dates
+            log_data,
             ip_address,
             user_agent,
             company_id
@@ -226,10 +241,33 @@ def delete_invoice(id, company_id, user_role, current_user_id, ip_address, user_
         if not invoice:
             raise ValueError(f"Invoice with id {id} not found")
 
-        # Check for related payments
+        # Check for related payments and delete them first
         payments = Payment.query.filter_by(invoice_id=id).all()
         if payments:
-            raise ValueError("Cannot delete invoice with associated payments")
+            # Delete all related payments
+            for payment in payments:
+                # Log payment deletion
+                payment_old_values = {
+                    'id': str(payment.id),
+                    'invoice_id': str(payment.invoice_id),
+                    'amount': float(payment.amount),
+                    'payment_date': payment.payment_date.isoformat(),
+                    'payment_method': payment.payment_method,
+                    'status': payment.status
+                }
+                
+                log_action(
+                    current_user_id,
+                    'DELETE',
+                    'payments',
+                    payment.id,
+                    payment_old_values,
+                    None,
+                    ip_address,
+                    user_agent,
+                    company_id
+                )
+                db.session.delete(payment)
 
         old_values = invoice_to_dict(invoice)
 
@@ -243,10 +281,10 @@ def delete_invoice(id, company_id, user_role, current_user_id, ip_address, user_
             invoice.id,
             old_values,
             None,
-                        ip_address,
+            ip_address,
             user_agent,
             company_id
-)
+        )
 
         return True
     except ValueError as e:
@@ -394,7 +432,12 @@ def generate_monthly_invoices(company_id, user_role, current_user_id, ip_address
 
 def get_enhanced_invoice_by_id(id, company_id, user_role):
     try:
-        if user_role == 'super_admin':
+        # For public access, don't filter by company_id
+        if user_role == 'public':
+            invoice = db.session.query(Invoice).options(
+                joinedload(Invoice.customer).joinedload(Customer.service_plan)
+            ).filter(Invoice.id == id, Invoice.is_active == True).first()
+        elif user_role == 'super_admin':
             invoice = db.session.query(Invoice).options(
                 joinedload(Invoice.customer).joinedload(Customer.service_plan)
             ).filter(Invoice.id == id).first()
@@ -410,7 +453,57 @@ def get_enhanced_invoice_by_id(id, company_id, user_role):
         if not invoice:
             return None
 
-        # Enhanced invoice data with customer and service plan details
+        # Get all payments for this invoice - FIXED for public access
+        payments = []
+        try:
+            if user_role == 'public':
+                # For public access, get payments without company_id filter
+                payments = db.session.query(Payment).filter(
+                    Payment.invoice_id == id,
+                    Payment.is_active == True
+                ).order_by(Payment.payment_date.desc()).all()
+            else:
+                # For authenticated users, use the payment_crud function
+                from app.crud import payment_crud
+                payments_data = payment_crud.get_payment_by_invoice_id(id, company_id) or []
+                # Convert to Payment objects if needed, or use as is
+                payments = payments_data
+        except Exception as payment_error:
+            logger.error(f"Error getting payments for invoice {id}: {str(payment_error)}")
+            payments = []
+
+        # Calculate total paid and remaining amount
+        if isinstance(payments, list) and payments and isinstance(payments[0], dict):
+            # If payments is a list of dictionaries from payment_crud
+            total_paid = sum(payment['amount'] for payment in payments if payment.get('status') == 'paid')
+        else:
+            # If payments is a list of Payment objects
+            total_paid = sum(float(payment.amount) for payment in payments if payment.status == 'paid')
+        
+        remaining_amount = float(invoice.total_amount) - total_paid
+
+        # Convert payments to consistent format
+        payment_list = []
+        if payments:
+            if isinstance(payments[0], dict):
+                # Already in dictionary format
+                payment_list = payments
+            else:
+                # Convert Payment objects to dictionaries
+                payment_list = [
+                    {
+                        'id': str(payment.id),
+                        'amount': float(payment.amount),
+                        'payment_date': payment.payment_date.isoformat(),
+                        'payment_method': payment.payment_method,
+                        'transaction_id': payment.transaction_id,
+                        'status': payment.status,
+                        'failure_reason': payment.failure_reason
+                    }
+                    for payment in payments
+                ]
+
+        # Enhanced invoice data with ALL customer and service plan details
         return {
             'id': str(invoice.id),
             'invoice_number': invoice.invoice_number,
@@ -431,8 +524,204 @@ def get_enhanced_invoice_by_id(id, company_id, user_role):
             'notes': invoice.notes,
             'generated_by': str(invoice.generated_by),
             'status': invoice.status,
-            'is_active': invoice.is_active
+            'is_active': invoice.is_active,
+            # Add payment information
+            'payments': payment_list,
+            'total_paid': total_paid,
+            'remaining_amount': remaining_amount
         }
     except Exception as e:
         logger.error(f"Error getting enhanced invoice {id}: {str(e)}")
         raise InvoiceError("Failed to retrieve invoice details")
+
+def get_customers_for_monthly_invoices(company_id, target_month=None):
+    """
+    Get customers eligible for monthly invoice generation.
+    Auto-deselects customers who already have invoices for the target month.
+    """
+    try:
+        # Determine target month
+        if target_month:
+            year = datetime.now().year
+            target_date = datetime(year, int(target_month), 1)
+        else:
+            target_date = datetime.now()
+            
+        # Calculate date range for checking existing invoices (25th of previous month to 4th of current month)
+        if target_date.month == 1:
+            prev_month = 12
+            prev_year = target_date.year - 1
+        else:
+            prev_month = target_date.month - 1
+            prev_year = target_date.year
+            
+        check_start_date = datetime(prev_year, prev_month, 25)
+        check_end_date = datetime(target_date.year, target_date.month, 4)
+        
+        # Get all active customers for the company
+        customers = Customer.query.filter(
+            Customer.company_id == company_id,
+            Customer.is_active == True
+        ).options(
+            joinedload(Customer.service_plan)
+        ).all()
+        
+        customer_data = []
+        for customer in customers:
+            # Check if invoice already exists for this customer in the target period
+            existing_invoice = Invoice.query.filter(
+                Invoice.customer_id == customer.id,
+                Invoice.invoice_type == 'subscription',
+                Invoice.billing_start_date >= check_start_date,
+                Invoice.billing_start_date <= check_end_date,
+                Invoice.is_active == True
+            ).first()
+            
+            # Calculate billing dates
+            billing_start_date = datetime(target_date.year, target_date.month, 1)
+            next_month = (billing_start_date.replace(day=1) + timedelta(days=32)).replace(day=1)
+            billing_end_date = (next_month - timedelta(days=1))
+            due_date = billing_end_date + timedelta(days=5)
+            
+            # Calculate amounts
+            service_plan_price = float(customer.service_plan.price) if customer.service_plan else 0
+            discount_amount = float(customer.discount_amount) if customer.discount_amount else 0
+            discount_percentage = (discount_amount / service_plan_price * 100) if service_plan_price > 0 else 0
+            total_amount = service_plan_price - discount_amount
+            
+            customer_data.append({
+                'id': str(customer.id),
+                'name': f"{customer.first_name} {customer.last_name}",
+                'internet_id': customer.internet_id,
+                'service_plan_name': customer.service_plan.name if customer.service_plan else 'N/A',
+                'service_plan_price': service_plan_price,
+                'discount_amount': discount_amount,
+                'discount_percentage': discount_percentage,
+                'total_amount': total_amount,
+                'billing_start_date': billing_start_date.date().isoformat(),
+                'billing_end_date': billing_end_date.date().isoformat(),
+                'due_date': due_date.date().isoformat(),
+                'has_existing_invoice': existing_invoice is not None,
+                'existing_invoice_number': existing_invoice.invoice_number if existing_invoice else None
+            })
+        
+        return customer_data
+        
+    except Exception as e:
+        logger.error(f"Error getting customers for monthly invoices: {str(e)}")
+        raise InvoiceError("Failed to get customers for monthly invoices")
+
+def generate_bulk_monthly_invoices(company_id, customer_ids, target_month, current_user_id, user_role, ip_address, user_agent):
+    """
+    Generate monthly invoices for multiple customers at once.
+    """
+    try:
+        if not customer_ids:
+            raise ValueError("No customers selected for invoice generation")
+        
+        # Parse target month
+        year = datetime.now().year
+        target_date = datetime(year, int(target_month), 1)
+        
+        generated_invoices = []
+        failed_invoices = []
+        
+        for customer_id in customer_ids:
+            try:
+                # Get customer details
+                customer = Customer.query.options(
+                    joinedload(Customer.service_plan)
+                ).filter(
+                    Customer.id == customer_id,
+                    Customer.company_id == company_id,
+                    Customer.is_active == True
+                ).first()
+                
+                if not customer:
+                    failed_invoices.append({
+                        'customer_id': customer_id,
+                        'error': 'Customer not found or inactive'
+                    })
+                    continue
+                
+                # Check if invoice already exists for this month
+                billing_start_date = datetime(target_date.year, target_date.month, 1)
+                next_month = (billing_start_date.replace(day=1) + timedelta(days=32)).replace(day=1)
+                billing_end_date = (next_month - timedelta(days=1))
+                
+                existing_invoice = Invoice.query.filter(
+                    Invoice.customer_id == customer_id,
+                    Invoice.invoice_type == 'subscription',
+                    Invoice.billing_start_date >= billing_start_date,
+                    Invoice.billing_start_date < next_month,
+                    Invoice.is_active == True
+                ).first()
+                
+                if existing_invoice:
+                    failed_invoices.append({
+                        'customer_id': customer_id,
+                        'customer_name': f"{customer.first_name} {customer.last_name}",
+                        'error': f'Invoice already exists: {existing_invoice.invoice_number}'
+                    })
+                    continue
+                
+                # Calculate billing period
+                due_date = billing_end_date + timedelta(days=5)
+                
+                # Calculate amounts
+                service_plan_price = float(customer.service_plan.price) if customer.service_plan else 0
+                discount_amount = float(customer.discount_amount) if customer.discount_amount else 0
+                discount_percentage = (discount_amount / service_plan_price * 100) if service_plan_price > 0 else 0
+                total_amount = service_plan_price - discount_amount
+                
+                # Create invoice data
+                invoice_data = {
+                    'company_id': str(company_id),
+                    'customer_id': str(customer_id),
+                    'billing_start_date': billing_start_date.date().isoformat(),
+                    'billing_end_date': billing_end_date.date().isoformat(),
+                    'due_date': due_date.date().isoformat(),
+                    'subtotal': service_plan_price,
+                    'discount_percentage': discount_percentage,
+                    'total_amount': total_amount,
+                    'invoice_type': 'subscription',
+                    'notes': f"Monthly subscription invoice for {customer.service_plan.name if customer.service_plan else 'N/A'} plan"
+                }
+                
+                # Generate invoice
+                new_invoice = add_invoice(
+                    invoice_data, 
+                    current_user_id, 
+                    user_role, 
+                    ip_address,
+                    user_agent
+                )
+                
+                generated_invoices.append({
+                    'customer_id': customer_id,
+                    'customer_name': f"{customer.first_name} {customer.last_name}",
+                    'invoice_number': new_invoice.invoice_number,
+                    'amount': total_amount
+                })
+                
+                logger.info(f"Generated invoice for customer {customer_id}: {new_invoice.invoice_number}")
+                
+            except Exception as e:
+                logger.error(f"Failed to generate invoice for customer {customer_id}: {str(e)}")
+                failed_invoices.append({
+                    'customer_id': customer_id,
+                    'customer_name': f"{customer.first_name} {customer.last_name}" if customer else 'Unknown',
+                    'error': str(e)
+                })
+        
+        return {
+            'generated': generated_invoices,
+            'failed': failed_invoices,
+            'total_generated': len(generated_invoices),
+            'total_failed': len(failed_invoices),
+            'target_month': target_date.strftime('%B %Y')
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in generate_bulk_monthly_invoices: {str(e)}")
+        raise InvoiceError(f"Failed to generate bulk monthly invoices: {str(e)}")

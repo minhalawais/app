@@ -3,6 +3,7 @@ from app.models import BankAccount
 from app.utils.logging_utils import log_action
 import uuid
 import logging
+from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ def get_all_bank_accounts(company_id, user_role):
                 'iban': account.iban,
                 'branch_code': account.branch_code,
                 'branch_address': account.branch_address,
+                'initial_balance': float(account.initial_balance) if account.initial_balance else 0.00,  # NEW
                 'is_active': account.is_active,
                 'created_at': account.created_at.isoformat() if account.created_at else None,
                 'updated_at': account.updated_at.isoformat() if account.updated_at else None,
@@ -39,6 +41,7 @@ def get_all_bank_accounts(company_id, user_role):
     except Exception as e:
         logger.error(f"Error getting bank accounts: {str(e)}")
         raise BankAccountError("Failed to retrieve bank accounts")
+
 
 def add_bank_account(data, user_role, current_user_id, ip_address, user_agent):
     try:
@@ -57,6 +60,7 @@ def add_bank_account(data, user_role, current_user_id, ip_address, user_agent):
             iban=data.get('iban'),
             branch_code=data.get('branch_code'),
             branch_address=data.get('branch_address'),
+            initial_balance=Decimal(str(data.get('initial_balance', 0.00))),  # NEW
             is_active=data.get('is_active', True)
         )
 
@@ -103,6 +107,7 @@ def update_bank_account(id, data, company_id, user_role, current_user_id, ip_add
             'iban': bank_account.iban,
             'branch_code': bank_account.branch_code,
             'branch_address': bank_account.branch_address,
+            'initial_balance': float(bank_account.initial_balance),  # NEW
             'is_active': bank_account.is_active
         }
 
@@ -119,6 +124,8 @@ def update_bank_account(id, data, company_id, user_role, current_user_id, ip_add
             bank_account.branch_code = data['branch_code']
         if 'branch_address' in data:
             bank_account.branch_address = data['branch_address']
+        if 'initial_balance' in data:  # NEW
+            bank_account.initial_balance = Decimal(str(data['initial_balance']))
         if 'is_active' in data:
             bank_account.is_active = data['is_active']
 
@@ -164,6 +171,7 @@ def delete_bank_account(id, company_id, user_role, current_user_id, ip_address, 
             'iban': bank_account.iban,
             'branch_code': bank_account.branch_code,
             'branch_address': bank_account.branch_address,
+            'initial_balance': float(bank_account.initial_balance),  # NEW
             'is_active': bank_account.is_active
         }
 

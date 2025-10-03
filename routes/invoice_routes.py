@@ -140,3 +140,134 @@ def generate_monthly_invoices():
     except Exception as e:
         logger.error(f"Error generating invoices: {str(e)}")
         return jsonify({'error': 'Failed to generate invoices', 'message': str(e)}), 500
+    
+@main.route('/invoices/bulk-monthly/preview', methods=['POST'])
+@jwt_required()
+def get_monthly_invoice_preview():
+    """
+    Get preview of customers eligible for monthly invoice generation
+    """
+    claims = get_jwt()
+    company_id = claims['company_id']
+    user_role = claims['role']
+    
+    if user_role not in ['super_admin', 'company_owner', 'manager']:
+        return jsonify({'error': 'Unauthorized access'}), 403
+    
+    try:
+        data = request.get_json() or {}
+        target_month = data.get('target_month')  # Format: '01' for January, '02' for February, etc.
+        
+        customers = invoice_crud.get_customers_for_monthly_invoices(company_id, target_month)
+        return jsonify({'customers': customers}), 200
+        
+    except invoice_crud.InvoiceError as e:
+        logger.error(f"Invoice error: {str(e)}")
+        return jsonify({'error': 'Failed to get monthly invoice preview', 'message': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Error getting monthly invoice preview: {str(e)}")
+        return jsonify({'error': 'Failed to get monthly invoice preview', 'message': str(e)}), 500
+
+@main.route('/invoices/bulk-monthly/generate', methods=['POST'])
+@jwt_required()
+def generate_bulk_monthly_invoices():
+    """
+    Generate monthly invoices for selected customers
+    """
+    claims = get_jwt()
+    company_id = claims['company_id']
+    user_role = claims['role']
+    current_user_id = get_jwt_identity()
+    ip_address = request.remote_addr
+    user_agent = request.headers.get('User-Agent')
+    
+    if user_role not in ['super_admin', 'company_owner', 'manager']:
+        return jsonify({'error': 'Unauthorized access'}), 403
+    
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+        
+        customer_ids = data.get('customer_ids', [])
+        target_month = data.get('target_month')
+        
+        if not customer_ids:
+            return jsonify({'error': 'No customers selected'}), 400
+        
+        result = invoice_crud.generate_bulk_monthly_invoices(
+            company_id, 
+            customer_ids, 
+            target_month,
+            current_user_id, 
+            user_role, 
+            ip_address, 
+            user_agent
+        )
+        
+        return jsonify(result), 200
+        
+    except invoice_crud.InvoiceError as e:
+        logger.error(f"Invoice error: {str(e)}")
+        return jsonify({'error': 'Failed to generate bulk monthly invoices', 'message': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Error generating bulk monthly invoices: {str(e)}")
+        return jsonify({'error': 'Failed to generate bulk monthly invoices', 'message': str(e)}), 500
+
+@main.route('/public/invoice/<string:id>', methods=['GET'])
+def get_public_invoice(id):
+    """
+    Public endpoint to view invoice without authentication
+    """
+    try:
+        # Get invoice with complete data for public view (now includes all fields)
+        invoice = invoice_crud.get_enhanced_invoice_by_id(id, None, 'public')
+        if not invoice:
+            return jsonify({'error': 'Invoice not found'}), 404
+        
+        # Return all the data (matching the authenticated version)
+        return jsonify(invoice), 200
+        
+    except Exception as e:
+        logger.error(f"Error fetching public invoice {id}: {str(e)}")
+        return jsonify({'error': 'Failed to fetch invoice'}), 500
+
+@main.route('/public/payments/invoice/<string:invoice_id>', methods=['GET'])
+def get_public_payment_details(invoice_id):
+    """
+    Public endpoint to get payment details for an invoice
+    """
+    try:
+        from app.crud import payment_crud
+        payments = payment_crud.get_payment_by_invoice_id(invoice_id, None)  # No company_id for public access
+        
+        if not payments:
+            return jsonify({'error': 'No payments found'}), 404
+        
+        return jsonify(payments), 200
+        
+    except Exception as e:
+        logger.error(f"Error fetching public payment details for invoice {invoice_id}: {str(e)}")
+        return jsonify({'error': 'Failed to fetch payment details'}), 500
+
+@main.route('/public/bank-accounts/list', methods=['GET'])
+def get_public_bank_accounts():
+    """
+    Public endpoint to get bank account information for payments
+    """
+    try:
+        from app.models import BankAccount
+        accounts = BankAccount.query.filter(BankAccount.is_active == True).all()
+        
+        return jsonify([{
+            'id': str(account.id),
+            'bank_name': account.bank_name,
+            'account_title': account.account_title,
+            'account_number': account.account_number,
+            'iban': account.iban,
+            'branch_code': account.branch_code
+        } for account in accounts]), 200
+        
+    except Exception as e:
+        logger.error(f"Error fetching public bank accounts: {str(e)}")
+        return jsonify({'error': 'Failed to fetch bank accounts'}), 500

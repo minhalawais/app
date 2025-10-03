@@ -5,6 +5,8 @@ import uuid
 import logging
 import os
 from werkzeug.utils import secure_filename
+from sqlalchemy import func  # ADD THIS IMPORT
+from decimal import Decimal  # ADD THIS IMPORT
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +61,7 @@ def get_all_payments(company_id, user_role,employee_id):
         logger.error(f"Error getting payments: {str(e)}")
         raise PaymentError("Failed to retrieve payments")
 
+# In payment_crud.py - Simplified logic
 def add_payment(data, user_role, current_user_id, ip_address, user_agent):
     try:
         # Validate required fields
@@ -71,16 +74,35 @@ def add_payment(data, user_role, current_user_id, ip_address, user_agent):
         UPLOAD_FOLDER = 'uploads/payment_proofs'
         os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
+        # Get invoice details for validation
+        invoice = Invoice.query.get(uuid.UUID(data['invoice_id']))
+        if not invoice:
+            raise ValueError("Invalid invoice_id")
+
+        # Calculate total paid amount for this invoice
+        total_paid = db.session.query(func.sum(Payment.amount)).filter(
+            Payment.invoice_id == uuid.UUID(data['invoice_id']),
+            Payment.is_active == True,
+            Payment.status == 'paid'  # Only count successful payments
+        ).scalar() or Decimal('0.00')
+
+        current_payment_amount = Decimal(str(data['amount']))
+        invoice_total = invoice.total_amount
+
+        # Check if payment exceeds invoice total
+        if total_paid + current_payment_amount > invoice_total:
+            raise ValueError(f"Payment amount exceeds invoice balance. Remaining balance: PKR {invoice_total - total_paid}")
+
         # Validate and create payment
         try:
             new_payment = Payment(
                 company_id=uuid.UUID(data['company_id']),
                 invoice_id=uuid.UUID(data['invoice_id']),
-                amount=float(data['amount']),
+                amount=current_payment_amount,
                 payment_date=data['payment_date'],
                 payment_method=data['payment_method'],
                 transaction_id=data.get('transaction_id'),
-                status=data['status'],
+                status=data['status'],  # paid, failed, etc.
                 failure_reason=data.get('failure_reason'),
                 received_by=uuid.UUID(data['received_by']),
                 bank_account_id=uuid.UUID(data['bank_account_id']) if data.get('bank_account_id') else None,
@@ -95,13 +117,16 @@ def add_payment(data, user_role, current_user_id, ip_address, user_agent):
 
         db.session.add(new_payment)
         
-        # Update invoice status
+        # Update invoice status ONLY if payment is successful
         if data['status'] == 'paid':
-            invoice = Invoice.query.get(uuid.UUID(data['invoice_id']))
-            if invoice:
+            total_paid_after = total_paid + current_payment_amount
+            
+            if total_paid_after == invoice_total:
                 invoice.status = 'paid'
+            elif total_paid_after > Decimal('0.00'):
+                invoice.status = 'partially_paid'
             else:
-                raise ValueError("Invalid invoice_id")
+                invoice.status = 'pending'
         
         db.session.commit()
 
@@ -112,10 +137,10 @@ def add_payment(data, user_role, current_user_id, ip_address, user_agent):
             new_payment.id,
             None,
             {k: v for k, v in data.items() if k != 'payment_proof'},
-                        ip_address,
+            ip_address,
             user_agent,
             uuid.UUID(data['company_id'])
-)
+        )
 
         return new_payment
     except ValueError as e:
@@ -167,6 +192,7 @@ def update_payment(id, data, company_id, user_role, current_user_id, ip_address,
             'failure_reason': payment.failure_reason,
             'payment_proof': payment.payment_proof,
             'received_by': str(payment.received_by),
+            'bank_account_id': str(payment.bank_account_id) if payment.bank_account_id else None,
             'is_active': payment.is_active
         }
 
@@ -188,33 +214,35 @@ def update_payment(id, data, company_id, user_role, current_user_id, ip_address,
         if 'received_by' in data:
             payment.received_by = uuid.UUID(data['received_by'])
         if 'is_active' in data:
-            payment.is_active = data['is_active']
+            # Convert string boolean to actual boolean
+            if isinstance(data['is_active'], str):
+                payment.is_active = data['is_active'].lower() == 'true'
+            else:
+                payment.is_active = bool(data['is_active'])
         if 'bank_account_id' in data:
             payment.bank_account_id = uuid.UUID(data['bank_account_id']) if data['bank_account_id'] else None
         
         # Handle payment proof update
-        if 'payment_proof' in data:
+        if 'payment_proof' in data and data['payment_proof']:
             try:
-                # Delete old file if it exists
-                if payment.payment_proof and os.path.exists(payment.payment_proof):
+                # Delete old file if it exists and is different from new one
+                if payment.payment_proof and os.path.exists(payment.payment_proof) and payment.payment_proof != data['payment_proof']:
                     os.remove(payment.payment_proof)
                 
-                file = data['payment_proof']
-                filename = secure_filename(file.filename)
-                file_path = os.path.join(UPLOAD_FOLDER, filename)
-                file.save(file_path)
-                payment.payment_proof = file_path
+                payment.payment_proof = data['payment_proof']
             except Exception as e:
                 logger.error(f"Error updating payment proof: {str(e)}")
                 raise PaymentError("Failed to update payment proof")
 
-        # Update invoice status
+        # Update invoice status based on payment status
         if payment.status == 'paid':
             invoice = Invoice.query.get(payment.invoice_id)
             if invoice:
                 invoice.status = 'paid'
-            else:
-                raise ValueError("Invalid invoice_id")
+        elif payment.status in ['failed', 'cancelled', 'refunded']:
+            invoice = Invoice.query.get(payment.invoice_id)
+            if invoice and invoice.status == 'paid':
+                invoice.status = 'pending'
 
         db.session.commit()
 
@@ -225,10 +253,10 @@ def update_payment(id, data, company_id, user_role, current_user_id, ip_address,
             payment.id,
             old_values,
             {k: v for k, v in data.items() if k != 'payment_proof'},
-                        ip_address,
+            ip_address,
             user_agent,
             company_id
-)
+        )
 
         return payment
     except ValueError as e:
@@ -313,23 +341,38 @@ def get_payment_proof(invoice_id,company_id):
         logger.error(f"Unexpected error while retrieving payment proof: {str(general_error)}")
         raise PaymentError("Unable to retrieve the payment proof")
 
-def get_payment_by_invoice_id(invoice_id, company_id):
+def get_payment_by_invoice_id(invoice_id, company_id=None):
+    """
+    Get all payments for an invoice.
+    For public access, company_id can be None.
+    """
     try:
-        payment = db.session.query(Payment).filter(
+        query = db.session.query(Payment).filter(
             Payment.invoice_id == invoice_id,
-            Payment.company_id == company_id
-        ).first()
+            Payment.is_active == True
+        )
         
-        if not payment:
-            return None
+        # Only filter by company_id if provided (for authenticated users)
+        if company_id:
+            query = query.filter(Payment.company_id == company_id)
+        
+        payments = query.order_by(Payment.payment_date.desc()).all()
+        
+        if not payments:
+            return []
             
-        return {
-            'id': str(payment.id),
-            'amount': float(payment.amount),
-            'payment_date': payment.payment_date.isoformat(),
-            'payment_method': payment.payment_method,
-            'transaction_id': payment.transaction_id,
-        }
+        return [
+            {
+                'id': str(payment.id),
+                'amount': float(payment.amount),
+                'payment_date': payment.payment_date.isoformat(),
+                'payment_method': payment.payment_method,
+                'transaction_id': payment.transaction_id,
+                'status': payment.status,
+                'failure_reason': payment.failure_reason
+            }
+            for payment in payments
+        ]
     except Exception as e:
-        logger.error(f"Error getting payment for invoice {invoice_id}: {str(e)}")
+        logger.error(f"Error getting payments for invoice {invoice_id}: {str(e)}")
         raise PaymentError("Failed to retrieve payment details")

@@ -5,6 +5,8 @@ from ..crud import isp_payment_crud
 import os
 from werkzeug.utils import secure_filename
 
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+UPLOAD_FOLDER = os.path.join(PROJECT_ROOT, 'uploads', 'isp_payment_proofs')
 @main.route('/isp-payments/list', methods=['GET'])
 @jwt_required()
 def get_isp_payments():
@@ -22,7 +24,6 @@ def get_isp_payments():
 @main.route('/isp-payments/add', methods=['POST'])
 @jwt_required()
 def add_new_isp_payment():
-    UPLOAD_FOLDER = 'uploads/isp_payment_proofs'
     claims = get_jwt()
     company_id = claims['company_id']
     user_role = claims['role']
@@ -98,7 +99,6 @@ def delete_existing_isp_payment(id):
 @main.route('/isp-payments/proof-image/<string:id>', methods=['GET'])
 @jwt_required()
 def get_isp_payment_proof_image(id):
-    UPLOAD_FOLDER_PATH = 'uploads/isp_payment_proofs'
     claims = get_jwt()
     company_id = claims.get('company_id')
 

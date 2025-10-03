@@ -15,9 +15,9 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.comments import Comment
 import json
 
-UPLOAD_FOLDER = os.path.join(current_app.root_path, 'uploads/cnic_images')
-ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'pdf'}
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+UPLOAD_FOLDER = os.path.join(PROJECT_ROOT, 'uploads', 'cnic_images')
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'pdf'}
 
 async def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -54,7 +54,6 @@ async def upload_customer_file(file_type):
         
         # Save the file
         file.save(file_path)
-        
         # Return the relative file path to be stored in the customer record
         return jsonify({
             'success': True,
@@ -174,7 +173,7 @@ async def update_existing_customer(id):
     
     if validation_errors:
         return jsonify({'errors': validation_errors}), 400
-    
+    print('Data:',data)
     try:
         # Check CNIC uniqueness (excluding current customer)
         if data.get('cnic'):

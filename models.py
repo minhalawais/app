@@ -195,7 +195,7 @@ class ISPPayment(db.Model):
     id = db.Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     company_id = db.Column(UUID(as_uuid=True), db.ForeignKey('companies.id'), nullable=False)
     isp_id = db.Column(UUID(as_uuid=True), db.ForeignKey('isps.id'), nullable=False)
-    bank_account_id = db.Column(UUID(as_uuid=True), db.ForeignKey('bank_accounts.id'), nullable=False)
+    bank_account_id = db.Column(UUID(as_uuid=True), db.ForeignKey('bank_accounts.id'), nullable=True)  # Changed to nullable=True
     
     # Flexible payment tracking
     payment_type = db.Column(isp_payment_type, nullable=False)
@@ -239,6 +239,7 @@ class BankAccount(db.Model):
     iban = db.Column(db.String(34))
     branch_code = db.Column(db.String(20))
     branch_address = db.Column(db.Text)
+    initial_balance = db.Column(db.Numeric(15, 2), default=0.00)  # NEW FIELD
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.TIMESTAMP(timezone=True), server_default=db.func.current_timestamp())
     updated_at = db.Column(db.TIMESTAMP(timezone=True), server_default=db.func.current_timestamp(), onupdate=db.func.current_timestamp())
