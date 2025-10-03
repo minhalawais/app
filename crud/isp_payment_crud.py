@@ -26,31 +26,25 @@ def add_isp_payment(data, user_role, current_user_id, ip_address, user_agent):
         if data.get('payment_method') == 'bank_transfer' and 'bank_account_id' not in data:
             raise ValueError("Bank account is required when payment method is Bank Transfer")
 
-        UPLOAD_FOLDER = 'uploads/isp_payment_proofs'
-        os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-
         # Create new payment
         new_payment = ISPPayment(
             company_id=uuid.UUID(data['company_id']),
             isp_id=uuid.UUID(data['isp_id']),
-            bank_account_id=uuid.UUID(data['bank_account_id']) if data.get('bank_account_id') else None,  # Make optional
+            bank_account_id=uuid.UUID(data['bank_account_id']) if data.get('bank_account_id') else None,
             payment_type=data['payment_type'],
             reference_number=data.get('reference_number'),
-            description=data.get('description', ''),  # Make description optional
+            description=data.get('description', ''),
             amount=float(data['amount']),
             payment_date=data['payment_date'],
             billing_period=data['billing_period'],
-            bandwidth_usage_gb=float(data['bandwidth_usage_gb']) if data.get('bandwidth_usage_gb') else None,  # Make bandwidth optional
+            bandwidth_usage_gb=float(data['bandwidth_usage_gb']) if data.get('bandwidth_usage_gb') else None,
             payment_method=data['payment_method'],
             transaction_id=data.get('transaction_id'),
             status=data.get('status', 'completed'),
             processed_by=uuid.UUID(data['processed_by']),
+            payment_proof=data.get('payment_proof'),  # Store file path string directly
             is_active=True
         )
-
-        # Handle payment proof
-        if 'payment_proof' in data and data['payment_proof']:
-            new_payment.payment_proof = data['payment_proof']
 
         db.session.add(new_payment)
         db.session.commit()

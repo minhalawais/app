@@ -4,6 +4,7 @@ from . import main
 from ..crud import isp_payment_crud
 import os
 from werkzeug.utils import secure_filename
+import uuid
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 UPLOAD_FOLDER = os.path.join(PROJECT_ROOT, 'uploads', 'isp_payment_proofs')
@@ -31,19 +32,21 @@ def add_new_isp_payment():
     ip_address = request.remote_addr
     user_agent = request.headers.get('User-Agent')
     
-    data = request.json
+    # Handle both JSON and form data
+    if request.is_json:
+        data = request.get_json()
+    else:
+        data = request.form.to_dict()
+    
     data['company_id'] = company_id
     data['processed_by'] = current_user_id
     
-    # Handle file upload
-    if 'payment_proof' in request.files:
-        file = request.files['payment_proof']
-        if file and allowed_file(file.filename):
-            filename = secure_filename(f"{company_id}_{data.get('isp_id', 'unknown')}_{file.filename}")
-            file_path = os.path.join(UPLOAD_FOLDER, filename)
-            os.makedirs(os.path.dirname(file_path), exist_ok=True)
-            file.save(file_path)
-            data['payment_proof'] = file_path
+    # Handle numeric conversions
+    if 'amount' in data:
+        data['amount'] = float(data['amount'])
+    if 'bandwidth_usage_gb' in data and data['bandwidth_usage_gb']:
+        data['bandwidth_usage_gb'] = float(data['bandwidth_usage_gb'])
+    
     try:
         new_payment = isp_payment_crud.add_isp_payment(data, user_role, current_user_id, ip_address, user_agent)
         return jsonify({'message': 'ISP payment added successfully', 'id': str(new_payment.id)}), 201
@@ -60,16 +63,11 @@ def update_existing_isp_payment(id):
     ip_address = request.remote_addr
     user_agent = request.headers.get('User-Agent')
     
-    data = request.form.to_dict() if request.form else request.json
-    
-    # Handle file upload for updates
-    if 'payment_proof' in request.files:
-        file = request.files['payment_proof']
-        if file and allowed_file(file.filename):
-            filename = secure_filename(file.filename)
-            file_path = os.path.join(UPLOAD_FOLDER, filename)
-            file.save(file_path)
-            data['payment_proof'] = file_path
+    # Handle both JSON and form data
+    if request.is_json:
+        data = request.get_json()
+    else:
+        data = request.form.to_dict()
     
     try:
         updated_payment = isp_payment_crud.update_isp_payment(id, data, company_id, user_role, current_user_id, ip_address, user_agent)
@@ -105,7 +103,7 @@ def get_isp_payment_proof_image(id):
     try:
         payment_proof = isp_payment_crud.get_isp_payment_proof(id, company_id)
         if payment_proof and payment_proof.get('proof_of_payment'):
-            proof_image_path = payment_proof['proof_of_payment']
+            proof_image_path = os.path.join(PROJECT_ROOT, payment_proof['proof_of_payment'])
             if os.path.exists(proof_image_path):
                 return send_file(proof_image_path, mimetype='image/jpeg')
             else:
@@ -118,3 +116,46 @@ def allowed_file(filename):
     ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'pdf'}
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+@main.route('/isp-payments/upload-file/<string:file_type>', methods=['POST'])
+@jwt_required()
+def upload_isp_payment_file(file_type):
+    claims = get_jwt()
+    company_id = claims['company_id']
+    
+    if file_type not in ['payment_proof']:
+        return jsonify({'error': 'Invalid file type'}), 400
+    
+    if file_type not in request.files:
+        return jsonify({'error': 'No file part'}), 400
+    
+    file = request.files[file_type]
+    
+    if file.filename == '':
+        return jsonify({'error': 'No selected file'}), 400
+    
+    if file and allowed_file(file.filename):
+        # Generate a unique filename with UUID to prevent collisions
+        file_extension = file.filename.rsplit('.', 1)[1].lower()
+        unique_filename = f"{uuid.uuid4()}_{file_type}.{file_extension}"
+        
+        # Create relative path
+        relative_path = os.path.join('uploads', 'isp_payment_proofs', unique_filename)
+        file_path = os.path.join(PROJECT_ROOT, relative_path)
+        
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        
+        # Save the file
+        file.save(file_path)
+        
+        # Return the relative file path to be stored in the payment record
+        return jsonify({
+            'success': True,
+            'file_path': relative_path,
+            'file_name': unique_filename,
+            'file_type': file_extension,
+            'message': 'File uploaded successfully'
+        }), 200
+    
+    return jsonify({'error': 'Invalid file format'}), 400

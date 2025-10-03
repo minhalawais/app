@@ -959,6 +959,8 @@ def get_unified_financial_data(company_id, filters=None):
         collections_data = get_collections_analysis(company_id, start_date, end_date, bank_account_id, invoice_status)
         isp_payment_data = get_isp_payment_analysis(company_id, start_date, end_date, bank_account_id, isp_payment_type)
 
+        cash_payments_data = get_cash_payments_data(company_id, start_date, end_date)
+
         # NEW: Calculate initial balance summary
         initial_balance_summary = get_initial_balance_summary(company_id, bank_account_id)
         
@@ -976,7 +978,7 @@ def get_unified_financial_data(company_id, filters=None):
 
         bank_accounts = BankAccount.query.filter_by(company_id=company_id, is_active=True).all()
         bank_accounts_list = [{'id': str(acc.id), 'name': f"{acc.bank_name} - {acc.account_number}"} for acc in bank_accounts]
-
+        print('cash_payments_data', cash_payments_data)
         return {
             'kpis': kpi_data,
             'cash_flow': cash_flow_data,
@@ -984,6 +986,7 @@ def get_unified_financial_data(company_id, filters=None):
             'bank_performance': bank_performance_data,
             'collections': collections_data,
             'isp_payments': isp_payment_data,
+            'cash_payments': cash_payments_data,  # NEW
             'filters': filters,
             'bank_accounts': bank_accounts_list,
             'initial_balance_summary': initial_balance_summary  # NEW
@@ -1272,7 +1275,8 @@ def get_bank_account_performance(company_id, start_date=None, end_date=None, ban
             BankAccount.company_id == company_id,
             BankAccount.is_active == True,
             Payment.is_active == True,
-            Payment.status == 'paid'
+            Payment.status == 'paid',
+            Payment.bank_account_id.isnot(None)  # EXCLUDE cash payments
         )
         
         if bank_account_id and bank_account_id != 'all':
@@ -1501,3 +1505,53 @@ def get_isp_payment_analysis(company_id, start_date=None, end_date=None, bank_ac
     except Exception as e:
         logger.error(f"Error calculating ISP payment analysis: {str(e)}")
         return {}
+
+def get_cash_payments_data(company_id, start_date=None, end_date=None):
+    """
+    Calculate cash payments (payments without bank_account_id)
+    """
+    try:
+        # Get cash collections (payments without bank_account_id)
+        cash_collections_query = db.session.query(
+            func.sum(Payment.amount).label('collections')
+        ).filter(
+            Payment.company_id == company_id,
+            Payment.is_active == True,
+            Payment.status == 'paid',
+            Payment.bank_account_id.is_(None)  # Cash payments have no bank account
+        )
+        
+        # Get cash ISP payments (ISP payments without bank_account_id)
+        cash_isp_payments_query = db.session.query(
+            func.sum(ISPPayment.amount).label('payments')
+        ).filter(
+            ISPPayment.company_id == company_id,
+            ISPPayment.is_active == True,
+            ISPPayment.status == 'completed',
+            ISPPayment.bank_account_id.is_(None)  # Cash ISP payments have no bank account
+        )
+        
+        # Apply date filters if provided
+        if start_date:
+            cash_collections_query = cash_collections_query.filter(Payment.payment_date >= start_date)
+            cash_isp_payments_query = cash_isp_payments_query.filter(ISPPayment.payment_date >= start_date)
+        if end_date:
+            cash_collections_query = cash_collections_query.filter(Payment.payment_date <= end_date)
+            cash_isp_payments_query = cash_isp_payments_query.filter(ISPPayment.payment_date <= end_date)
+        
+        cash_collections = cash_collections_query.scalar() or 0
+        cash_isp_payments = cash_isp_payments_query.scalar() or 0
+        cash_net_flow = float(cash_collections) - float(cash_isp_payments)
+        
+        return {
+            'collections': float(cash_collections),
+            'payments': float(cash_isp_payments),
+            'net_flow': cash_net_flow
+        }
+    except Exception as e:
+        logger.error(f"Error calculating cash payments data: {str(e)}")
+        return {
+            'collections': 0,
+            'payments': 0,
+            'net_flow': 0
+        }
