@@ -1,12 +1,12 @@
 from app import db
-from app.models import Invoice, Customer, Payment, ServicePlan
+from app.models import Invoice, Customer, Payment, ServicePlan, User
 from app.utils.logging_utils import log_action
 import uuid
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError, DatabaseError
 import logging
 from sqlalchemy.orm import joinedload
 from datetime import datetime, timedelta
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, or_, asc, desc, func
 logger = logging.getLogger(__name__)
 
 class InvoiceError(Exception):
@@ -19,15 +19,9 @@ class PaymentError(Exception):
 
 def get_all_invoices(company_id, user_role, employee_id):
     try:
-        if user_role == 'super_admin':
-            invoices = db.session.query(Invoice).options(joinedload(Invoice.customer)).all()
-        elif user_role == 'auditor':
-            invoices = db.session.query(Invoice).options(joinedload(Invoice.customer)).filter(Invoice.is_active == True).all()
-        elif user_role == 'company_owner':
-            invoices = db.session.query(Invoice).options(joinedload(Invoice.customer)).filter(Invoice.company_id == company_id).all()
-        elif user_role == 'employee':
-            invoices = db.session.query(Invoice).options(joinedload(Invoice.customer)).filter(Invoice.generated_by == employee_id).all()
-        # Include customer.internet_id in the returned data
+        base = db.session.query(Invoice).options(joinedload(Invoice.customer))
+        base = _apply_role_scope(base, company_id, user_role, employee_id)
+        invoices = base.all()
         return [
             {
                 **invoice_to_dict(invoice),
@@ -45,7 +39,7 @@ def invoice_to_dict(invoice):
         'invoice_number': invoice.invoice_number,
         'company_id': str(invoice.company_id),
         'customer_id': str(invoice.customer_id),
-        'customer_name': f"{invoice.customer.first_name} {invoice.customer.last_name}" if invoice.customer else "N/A",\
+        'customer_name': f"{invoice.customer.first_name} {invoice.customer.last_name}" if invoice.customer else "N/A",
         'customer_phone': invoice.customer.phone_1 if invoice.customer else "",
         'billing_start_date': invoice.billing_start_date.isoformat(),
         'billing_end_date': invoice.billing_end_date.isoformat(),
@@ -148,12 +142,7 @@ def add_invoice(data, current_user_id, user_role, ip_address, user_agent):
 
 def update_invoice(id, data, company_id, user_role, current_user_id, ip_address, user_agent):
     try:
-        if user_role == 'super_admin':
-            invoice = Invoice.query.get(id)
-        elif user_role == 'auditor':
-            invoice = Invoice.query.filter_by(id=id, is_active=True, company_id=company_id).first()
-        elif user_role == 'company_owner':
-            invoice = Invoice.query.filter_by(id=id, company_id=company_id).first()
+        invoice = get_invoice_by_id(id, company_id, user_role)
 
         if not invoice:
             raise ValueError(f"Invoice with id {id} not found")
@@ -231,12 +220,7 @@ def update_invoice(id, data, company_id, user_role, current_user_id, ip_address,
     
 def delete_invoice(id, company_id, user_role, current_user_id, ip_address, user_agent):
     try:
-        if user_role == 'super_admin':
-            invoice = Invoice.query.get(id)
-        elif user_role == 'auditor':
-            invoice = Invoice.query.filter_by(id=id, is_active=True, company_id=company_id).first()
-        elif user_role == 'company_owner':
-            invoice = Invoice.query.filter_by(id=id, company_id=company_id).first()
+        invoice = get_invoice_by_id(id, company_id, user_role)
 
         if not invoice:
             raise ValueError(f"Invoice with id {id} not found")
@@ -297,12 +281,9 @@ def delete_invoice(id, company_id, user_role, current_user_id, ip_address, user_
 
 def get_invoice_by_id(id, company_id, user_role):
     try:
-        if user_role == 'super_admin':
-            invoice = Invoice.query.get(id)
-        elif user_role == 'auditor':
-            invoice = Invoice.query.filter_by(id=id, is_active=True, company_id=company_id).first()
-        elif user_role == 'company_owner':
-            invoice = Invoice.query.filter_by(id=id, company_id=company_id).first()
+        base = db.session.query(Invoice).options(joinedload(Invoice.customer))
+        base = _apply_role_scope(base, company_id, user_role, None)
+        invoice = base.filter(Invoice.id == id).first()
 
         return invoice
     except Exception as e:
@@ -725,3 +706,103 @@ def generate_bulk_monthly_invoices(company_id, customer_ids, target_month, curre
     except Exception as e:
         logger.error(f"Error in generate_bulk_monthly_invoices: {str(e)}")
         raise InvoiceError(f"Failed to generate bulk monthly invoices: {str(e)}")
+
+def _apply_role_scope(query, company_id, user_role, employee_id):
+    q = query.filter(Invoice.company_id == company_id)
+    if user_role not in ['super_admin', 'company_owner', 'manager']:
+        # example: restrict to invoices the employee generated or owns; adjust to your policy
+        q = q.filter(Invoice.generated_by == employee_id)
+    return q
+
+def get_invoices_page(company_id, user_role, employee_id, page=1, page_size=20, sort=None, q=None):
+    base = db.session.query(
+        Invoice.id,
+        Invoice.invoice_number,
+        Invoice.customer_id,
+        Invoice.billing_start_date,
+        Invoice.billing_end_date,
+        Invoice.due_date,
+        Invoice.subtotal,
+        Invoice.discount_percentage,
+        Invoice.total_amount,
+        Invoice.invoice_type,
+        Invoice.notes,
+        Invoice.status,
+        Customer.internet_id,
+        (Customer.first_name + ' ' + Customer.last_name).label('customer_name'),
+    ).join(Customer, Customer.id == Invoice.customer_id)
+
+    base = _apply_role_scope(base, company_id, user_role, employee_id)
+
+    if q:
+        like = f"%{q}%"
+        base = base.filter(or_(
+            Invoice.invoice_number.ilike(like),
+            Customer.internet_id.ilike(like),
+            Customer.first_name.ilike(like),
+            Customer.last_name.ilike(like),
+            Invoice.status.ilike(like),
+        ))
+    # sorting
+    if sort:
+        for part in sort.split(','):
+            try:
+                col, direction = part.split(':')
+                direction = direction.lower().strip()
+            except ValueError:
+                col, direction = part, 'asc'
+            col = col.strip()
+            mapping = {
+                'invoice_number': Invoice.invoice_number,
+                'due_date': Invoice.due_date,
+                'billing_start_date': Invoice.billing_start_date,
+                'billing_end_date': Invoice.billing_end_date,
+                'total_amount': Invoice.total_amount,
+                'status': Invoice.status,
+                'internet_id': Customer.internet_id,
+                'customer_name': func.concat(Customer.first_name, ' ', Customer.last_name),
+            }
+            column = mapping.get(col)
+            if column is not None:
+                base = base.order_by(desc(column) if direction == 'desc' else asc(column))
+    else:
+        base = base.order_by(desc(Invoice.created_at))
+
+    total = base.count()
+    items = base.limit(page_size).offset((page - 1) * page_size).all()
+
+    def serialize(row):
+        return {
+            'id': str(row.id),
+            'invoice_number': row.invoice_number,
+            'customer_id': str(row.customer_id) if row.customer_id else None,
+            'internet_id': row.internet_id,
+            'customer_name': row.customer_name,
+            'billing_start_date': row.billing_start_date.isoformat() if row.billing_start_date else None,
+            'billing_end_date': row.billing_end_date.isoformat() if row.billing_end_date else None,
+            'due_date': row.due_date.isoformat() if row.due_date else None,
+            'subtotal': float(row.subtotal) if row.subtotal is not None else 0,
+            'discount_percentage': float(row.discount_percentage) if row.discount_percentage is not None else 0,
+            'total_amount': float(row.total_amount) if row.total_amount is not None else 0,
+            'invoice_type': row.invoice_type,
+            'notes': row.notes,
+            'status': row.status,
+        }
+
+    # quick stats (optional)
+    stats = {
+        'total': total,
+        'paid': db.session.query(func.count(Invoice.id)).filter(Invoice.company_id == company_id, Invoice.status == 'paid').scalar(),
+        'pending': db.session.query(func.count(Invoice.id)).filter(Invoice.company_id == company_id, Invoice.status == 'pending').scalar(),
+    }
+
+    return {'items': [serialize(x) for x in items], 'total': total, 'stats': stats}
+
+def get_invoices_summary(company_id, user_role, employee_id):
+    q = db.session.query(Invoice).filter(Invoice.company_id == company_id)
+    if user_role not in ['super_admin', 'company_owner', 'manager']:
+        q = q.filter(Invoice.generated_by == employee_id)
+    total = q.count()
+    paid = q.filter(Invoice.status == 'paid').count()
+    pending = q.filter(Invoice.status == 'pending').count()
+    return {'total': total, 'paid': paid, 'pending': pending}

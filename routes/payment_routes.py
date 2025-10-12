@@ -1,4 +1,4 @@
-from flask import jsonify, request,send_file,current_app
+from flask import jsonify, request,send_file,current_app,Response
 from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 from . import main
 from ..crud import payment_crud,bank_account_crud
@@ -165,3 +165,74 @@ def get_invoice_payment_details(invoice_id):
         print(f"Error fetching payment for invoice {invoice_id}: {str(e)}")
         return jsonify({'error': 'Failed to fetch payment details'}), 500
 
+@main.route('/payments/page', methods=['GET'])
+@jwt_required()
+def list_payments_paginated():
+    claims = get_jwt()
+    company_id = claims['company_id']
+    user_role = claims['role']
+    employee_id = claims['id']
+
+    # Query params
+    page = int(request.args.get('page', 1))
+    page_size = int(request.args.get('page_size', 20))
+    sort_by = request.args.get('sort_by', 'payment_date')
+    sort_dir = request.args.get('sort_dir', 'desc')
+    q = request.args.get('q', '')
+
+    # Column filters come as filter_<column>=value
+    filters = {k.replace('filter_', ''): v for k, v in request.args.items() if k.startswith('filter_') and v}
+
+    try:
+      items, total = payment_crud.list_payments_paginated(
+          company_id=company_id,
+          user_role=user_role,
+          employee_id=employee_id,
+          page=page,
+          page_size=page_size,
+          sort_by=sort_by,
+          sort_dir=sort_dir,
+          q=q,
+          filters=filters,
+      )
+      return jsonify({ 'items': items, 'total': total }), 200
+    except Exception as e:
+      current_app.logger.error(f"Paginated payments error: {e}")
+      return jsonify({'error': 'Failed to fetch payments'}), 500
+
+@main.route('/payments/summary', methods=['GET'])
+@jwt_required()
+def payments_summary():
+    claims = get_jwt()
+    company_id = claims['company_id']
+    user_role = claims['role']
+    employee_id = claims['id']
+
+    try:
+      summary = payment_crud.get_payments_summary(company_id, user_role, employee_id)
+      return jsonify(summary), 200
+    except Exception as e:
+      current_app.logger.error(f"Summary error: {e}")
+      return jsonify({'error': 'Failed to get summary'}), 500
+
+@main.route('/payments/export', methods=['GET'])
+@jwt_required()
+def export_payments_csv():
+    claims = get_jwt()
+    company_id = claims['company_id']
+    user_role = claims['role']
+    employee_id = claims['id']
+
+    sort_by = request.args.get('sort_by', 'payment_date')
+    sort_dir = request.args.get('sort_dir', 'desc')
+    q = request.args.get('q', '')
+    filters = {k.replace('filter_', ''): v for k, v in request.args.items() if k.startswith('filter_') and v}
+
+    # Stream large CSV
+    def generate():
+        yield "invoice_number,customer_name,amount,payment_date,payment_method,status,received_by,bank_account\n"
+        for row in payment_crud.stream_payments(company_id, user_role, employee_id, sort_by, sort_dir, q, filters):
+            yield f"{row['invoice_number']},{row['customer_name']},{row['amount']},{row['payment_date']},{row['payment_method']},{row['status']},{row['received_by']},{row.get('bank_account_details','')}\n"
+
+    return Response(generate(), mimetype='text/csv',
+                    headers={"Content-Disposition": "attachment; filename=payments.csv"})

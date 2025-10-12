@@ -271,3 +271,42 @@ def get_public_bank_accounts():
     except Exception as e:
         logger.error(f"Error fetching public bank accounts: {str(e)}")
         return jsonify({'error': 'Failed to fetch bank accounts'}), 500
+
+@main.route('/invoices/page', methods=['GET'])
+@jwt_required()
+def get_invoices_page():
+    claims = get_jwt()
+    company_id = claims['company_id']
+    user_role = claims['role']
+    employee_id = claims['id']
+
+    page = int(request.args.get('page', 1))
+    page_size = int(request.args.get('page_size', 20))
+    sort = request.args.get('sort')  # e.g. "invoice_number:asc,due_date:desc"
+    q = request.args.get('q')
+
+    result = invoice_crud.get_invoices_page(
+        company_id=company_id,
+        user_role=user_role,
+        employee_id=employee_id,
+        page=page,
+        page_size=page_size,
+        sort=sort,
+        q=q,
+    )
+    return jsonify(result), 200
+
+@main.route('/invoices/summary', methods=['GET'])
+@jwt_required()
+def get_invoices_summary():
+    claims = get_jwt()
+    company_id = claims['company_id']
+    user_role = claims['role']
+    employee_id = claims['id']
+
+    summary = invoice_crud.get_invoices_summary(
+        company_id=company_id,
+        user_role=user_role,
+        employee_id=employee_id,
+    )
+    return jsonify(summary), 200

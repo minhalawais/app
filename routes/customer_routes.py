@@ -557,6 +557,60 @@ async def get_customer_template():
         mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     )
 
+
+# Add this new route for fetching reference data (areas, service plans, ISPs)
+@main.route('/customers/reference-data', methods=['GET'])
+@jwt_required()
+async def get_reference_data():
+    """Get all reference data needed for bulk customer import"""
+    claims = get_jwt()
+    company_id = claims['company_id']
+    
+    try:
+        areas = await customer_crud.get_company_areas(company_id)
+        service_plans = await customer_crud.get_company_service_plans(company_id)
+        isps = await customer_crud.get_company_isps(company_id)
+        
+        return jsonify({
+            'areas': areas,
+            'servicePlans': service_plans,
+            'isps': isps
+        }), 200
+    except Exception as e:
+        logger.error(f"Error fetching reference data: {str(e)}")
+        return jsonify({'error': 'Failed to fetch reference data'}), 500
+
+
+@main.route('/customers/validate-single-row', methods=['POST'])
+@jwt_required()
+async def validate_single_row():
+    """Validate a single customer row with field-specific error reporting"""
+    claims = get_jwt()
+    company_id = claims['company_id']
+    
+    try:
+        row_data = request.json.get('rowData')
+        if not row_data:
+            return jsonify({'error': 'No row data provided'}), 400
+        
+        # Convert single row to DataFrame for validation
+        df = pd.DataFrame([row_data])
+        
+        # Use existing validation logic
+        validation_results = await customer_crud.validate_bulk_customers(df, company_id)
+        
+        # Parse if string
+        if isinstance(validation_results, str):
+            validation_results = json.loads(validation_results)
+        
+        return jsonify(validation_results), 200
+        
+    except Exception as e:
+        logger.error(f"Error validating single row: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+# Update validate_bulk_customers route to ensure proper JSON response
 @main.route('/customers/validate-bulk', methods=['POST'])
 @jwt_required()
 async def validate_bulk_customers():
@@ -587,20 +641,38 @@ async def validate_bulk_customers():
             df = pd.read_csv(temp_file.name)
         else:  # Excel file
             df = pd.read_excel(temp_file.name)
-        print('Dataframe: ',df)
+        
+        print('DataFrame columns:', df.columns.tolist())
+        print('DataFrame shape:', df.shape)
+        
         # Validate the data without saving
         validation_results = await customer_crud.validate_bulk_customers(df, company_id)
+        
+        # Parse if it's a string
+        if isinstance(validation_results, str):
+            validation_results = json.loads(validation_results)
         
         return jsonify(validation_results), 200
     
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Error in validate_bulk_customers: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'totalRecords': 0,
+            'successCount': 0,
+            'failedCount': 0,
+            'validRows': [],
+            'errors': []
+        }), 500
     
     finally:
         # Clean up the temporary file
         if os.path.exists(temp_file.name):
             os.unlink(temp_file.name)
 
+
+# Update bulk_add_customers route to handle validated data properly
 @main.route('/customers/bulk-add', methods=['POST'])
 @jwt_required()
 async def bulk_add_customers():
@@ -612,38 +684,43 @@ async def bulk_add_customers():
     ip_address = request.remote_addr
     user_agent = request.headers.get('User-Agent')
     
-    if 'validatedData' in request.json:
-        # Process pre-validated data
-        validated_data = request.json['validatedData']
-        results = await customer_crud.process_validated_customers(
-            validated_data, 
-            company_id, 
-            user_role, 
-            current_user_id, 
-            ip_address, 
-            user_agent
-        )
-        return jsonify(results), 200
-    
-    # Original file upload logic
-    if 'file' not in request.files:
-        return jsonify({'error': 'No file provided'}), 400
-    
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({'error': 'No file selected'}), 400
-    
-    # Check file extension
-    file_ext = os.path.splitext(file.filename)[1].lower()
-    if file_ext not in ['.csv', '.xls', '.xlsx']:
-        return jsonify({'error': 'Invalid file format. Please upload a CSV or Excel file'}), 400
-    
-    # Save the file temporarily
-    temp_file = tempfile.NamedTemporaryFile(delete=False)
-    file.save(temp_file.name)
-    temp_file.close()
-    
     try:
+        # Check if we're receiving pre-validated data
+        if request.is_json and 'validatedData' in request.json:
+            # Process pre-validated data
+            validated_data = request.json['validatedData']
+            
+            print(f"Processing {len(validated_data)} pre-validated records")
+            
+            results = await customer_crud.process_validated_customers(
+                validated_data, 
+                company_id, 
+                user_role, 
+                current_user_id, 
+                ip_address, 
+                user_agent
+            )
+            
+            return jsonify(results), 200
+        
+        # Original file upload logic (fallback)
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file provided'}), 400
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
+        
+        # Check file extension
+        file_ext = os.path.splitext(file.filename)[1].lower()
+        if file_ext not in ['.csv', '.xls', '.xlsx']:
+            return jsonify({'error': 'Invalid file format. Please upload a CSV or Excel file'}), 400
+        
+        # Save the file temporarily
+        temp_file = tempfile.NamedTemporaryFile(delete=False)
+        file.save(temp_file.name)
+        temp_file.close()
+        
         # Read the file based on its extension
         if file_ext == '.csv':
             df = pd.read_csv(temp_file.name)
@@ -663,9 +740,17 @@ async def bulk_add_customers():
         return jsonify(results), 200
     
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Error in bulk_add_customers: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'totalRecords': 0,
+            'successCount': 0,
+            'failedCount': 0,
+            'errors': []
+        }), 500
     
     finally:
-        # Clean up the temporary file
-        if os.path.exists(temp_file.name):
+        # Clean up the temporary file if it exists
+        if 'temp_file' in locals() and os.path.exists(temp_file.name):
             os.unlink(temp_file.name)

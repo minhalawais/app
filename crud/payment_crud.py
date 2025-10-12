@@ -1,11 +1,11 @@
 from app import db
-from app.models import Payment, Customer, Invoice, Company, BankAccount
+from app.models import Payment, Customer, Invoice, Company, BankAccount,User
 from app.utils.logging_utils import log_action
 import uuid
 import logging
 import os
 from werkzeug.utils import secure_filename
-from sqlalchemy import func  # ADD THIS IMPORT
+from sqlalchemy import func, or_, asc, desc
 from decimal import Decimal  # ADD THIS IMPORT
 
 logger = logging.getLogger(__name__)
@@ -376,3 +376,107 @@ def get_payment_by_invoice_id(invoice_id, company_id=None):
     except Exception as e:
         logger.error(f"Error getting payments for invoice {invoice_id}: {str(e)}")
         raise PaymentError("Failed to retrieve payment details")
+
+def _base_scope(company_id, user_role, employee_id):
+    q = db.session.query(Payment).join(Invoice, Payment.invoice_id == Invoice.id)\
+                                 .join(Customer, Invoice.customer_id == Customer.id)\
+                                 .join(User, Payment.received_by == User.id)\
+                                 .outerjoin(BankAccount, Payment.bank_account_id == BankAccount.id)
+    if user_role == 'super_admin':
+        return q
+    elif user_role == 'auditor':
+        return q.filter(Payment.is_active == True, Payment.company_id == company_id)
+    elif user_role == 'company_owner':
+        return q.filter(Payment.company_id == company_id)
+    elif user_role == 'employee':
+        return q.filter(Payment.received_by == employee_id)
+    return q.filter(Payment.company_id == company_id)
+
+def _apply_filters(q, qtext, filters):
+    if qtext:
+        like = f"%{qtext}%"
+        q = q.filter(or_(
+            Invoice.invoice_number.ilike(like),
+            Customer.first_name.ilike(like),
+            Customer.last_name.ilike(like),
+            Payment.payment_method.ilike(like),
+            Payment.transaction_id.ilike(like),
+        ))
+    # Column-specific filters
+    if filters.get('status'):
+        q = q.filter(Payment.status == filters['status'])
+    if filters.get('payment_method'):
+        q = q.filter(Payment.payment_method == filters['payment_method'])
+    if filters.get('bank_account_details'):
+        # match bank_name or account_number
+        like = f"%{filters['bank_account_details']}%"
+        q = q.filter(or_(BankAccount.bank_name.ilike(like), BankAccount.account_number.ilike(like)))
+    if filters.get('payment_date_from'):
+        q = q.filter(Payment.payment_date >= filters['payment_date_from'])
+    if filters.get('payment_date_to'):
+        q = q.filter(Payment.payment_date <= filters['payment_date_to'])
+    return q
+
+def _apply_sort(q, sort_by, sort_dir):
+    colmap = {
+        'invoice_number': Invoice.invoice_number,
+        'customer_name': Customer.first_name,  # simple first_name sort
+        'amount': Payment.amount,
+        'payment_date': Payment.payment_date,
+        'payment_method': Payment.payment_method,
+        'status': Payment.status,
+        'received_by': User.first_name,
+    }
+    col = colmap.get(sort_by or 'payment_date', Payment.payment_date)
+    direction = desc if (sort_dir or 'desc').lower() == 'desc' else asc
+    return q.order_by(direction(col))
+
+def _row_to_dict(p: Payment):
+    return {
+        'id': str(p.id),
+        'invoice_id': str(p.invoice_id),
+        'invoice_number': p.invoice.invoice_number,
+        'customer_name': f"{p.invoice.customer.first_name} {p.invoice.customer.last_name}",
+        'amount': float(p.amount),
+        'payment_date': p.payment_date.isoformat(),
+        'payment_method': p.payment_method,
+        'transaction_id': p.transaction_id,
+        'status': p.status,
+        'failure_reason': p.failure_reason,
+        'payment_proof': p.payment_proof,
+        'received_by': f"{p.receiver.first_name} {p.receiver.last_name}",
+        'is_active': p.is_active,
+        'bank_account_id': str(p.bank_account_id) if p.bank_account_id else None,
+        'bank_account_details': f"{p.bank_account.bank_name} - {p.bank_account.account_number}" if p.bank_account else None,
+    }
+
+def list_payments_paginated(company_id, user_role, employee_id, page, page_size, sort_by, sort_dir, q=None, filters=None):
+    filters = filters or {}
+    base = _base_scope(company_id, user_role, employee_id)
+    base = _apply_filters(base, q, filters)
+    total = base.count()
+    base = _apply_sort(base, sort_by, sort_dir)
+    rows = base.limit(page_size).offset((page - 1) * page_size).all()
+    return ([_row_to_dict(p) for p in rows], total)
+
+def get_payments_summary(company_id, user_role, employee_id):
+    base = _base_scope(company_id, user_role, employee_id)
+    total = base.count()
+    active = base.filter(Payment.is_active == True).count()
+    total_amount = db.session.query(func.coalesce(func.sum(Payment.amount), 0)).select_from(Payment).scalar() or 0
+    return {
+        'total': int(total),
+        'active': int(active),
+        'totalAmount': float(total_amount),
+    }
+
+def stream_payments(company_id, user_role, employee_id, sort_by, sort_dir, qtext, filters):
+    from flask import current_app
+    
+    # Use application context for database operations
+    with current_app.app_context():
+        q = _base_scope(company_id, user_role, employee_id)
+        q = _apply_filters(q, qtext, filters)
+        q = _apply_sort(q, sort_by, sort_dir)
+        for p in q.yield_per(1000):  # efficient streaming
+            yield _row_to_dict(p)
