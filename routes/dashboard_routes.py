@@ -144,3 +144,19 @@ def get_unified_financial_data():
     except Exception as e:
         logger.error(f"Error fetching unified financial data: {str(e)}")
         return jsonify({'error': 'Failed to fetch unified financial data'}), 500
+
+@main.route('/dashboard/ledger', methods=['GET'])
+@jwt_required()
+def get_ledger():
+    claims = get_jwt()
+    company_id = claims['company_id']
+    filters = {
+        'start_date': request.args.get('start_date'),
+        'end_date': request.args.get('end_date'),
+        'bank_account_id': request.args.get('bank_account_id', 'all'),
+        'payment_method': request.args.get('payment_method', 'all'),
+        'invoice_status': request.args.get('invoice_status', 'all'),
+        'isp_payment_type': request.args.get('isp_payment_type', 'all'),
+    }
+    data = dashboard_crud.get_ledger_data(company_id, filters)
+    return jsonify(data), 200

@@ -1,5 +1,5 @@
 from app import db
-from app.models import Expense,ExpenseType
+from app.models import Expense, ExpenseType
 import uuid
 import logging
 from decimal import Decimal
@@ -11,6 +11,7 @@ class ExpenseError(Exception):
 
 class ExpenseTypeError(Exception):
     pass
+
 def get_all_expenses(company_id, user_role):
     try:
         if user_role == 'super_admin':
@@ -96,6 +97,7 @@ def update_expense(id, data, company_id, user_role, current_user_id, ip_address,
         logger.error(f"Error updating expense {id}: {str(e)}")
         db.session.rollback()
         raise ExpenseError("Failed to update expense")
+
 def delete_expense(id, company_id, user_role, current_user_id, ip_address, user_agent):
     try:
         if user_role == 'super_admin':
@@ -154,6 +156,31 @@ def add_expense_type(data, user_role, current_user_id, ip_address, user_agent):
         logger.error(f"Error adding expense type: {str(e)}")
         db.session.rollback()
         raise ExpenseTypeError("Failed to create expense type")
+
+def update_expense_type(id, data, company_id, user_role, current_user_id, ip_address, user_agent):
+    try:
+        if user_role == 'super_admin':
+            expense_type = ExpenseType.query.get(id)
+        else:
+            expense_type = ExpenseType.query.filter_by(id=id, company_id=company_id).first()
+
+        if not expense_type:
+            raise ValueError(f"Expense type with id {id} not found")
+
+        # Update fields
+        if 'name' in data:
+            expense_type.name = data['name']
+        if 'description' in data:
+            expense_type.description = data['description']
+        if 'is_active' in data:
+            expense_type.is_active = data['is_active']
+
+        db.session.commit()
+        return expense_type
+    except Exception as e:
+        logger.error(f"Error updating expense type {id}: {str(e)}")
+        db.session.rollback()
+        raise ExpenseTypeError("Failed to update expense type")
 
 def delete_expense_type(id, company_id, user_role, current_user_id, ip_address, user_agent):
     try:

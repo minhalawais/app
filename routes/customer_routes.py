@@ -245,6 +245,7 @@ async def get_customer_payments(id):
     payments = await customer_crud.get_customer_payments(id, company_id)
     return jsonify(payments), 200
 
+
 @main.route('/complaints/customer/<string:id>', methods=['GET'])
 @jwt_required()
 async def get_customer_complaints(id):

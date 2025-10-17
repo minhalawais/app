@@ -93,6 +93,23 @@ def add_extra_income_type():
         print('Error: ',e)
         return jsonify({'error': 'Failed to add extra income type', 'message': str(e)}), 400
 
+@main.route('/extra-income-types/update/<string:id>', methods=['PUT'])
+@jwt_required()
+def update_extra_income_type(id):
+    claims = get_jwt()
+    company_id = claims['company_id']
+    user_role = claims['role']
+    current_user_id = get_jwt_identity()
+    data = request.json
+    
+    try:
+        updated_income_type = extra_income_crud.update_extra_income_type(id, data, company_id, user_role, current_user_id, request.remote_addr, request.headers.get('User-Agent'))
+        if updated_income_type:
+            return jsonify({'message': 'Extra income type updated successfully'}), 200
+        return jsonify({'message': 'Extra income type not found'}), 404
+    except Exception as e:
+        return jsonify({'error': 'Failed to update extra income type', 'message': str(e)}), 400
+
 @main.route('/extra-income-types/delete/<string:id>', methods=['DELETE'])
 @jwt_required()
 def delete_extra_income_type(id):

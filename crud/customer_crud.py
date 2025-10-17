@@ -1,5 +1,5 @@
 from app import db
-from app.models import Customer, Invoice, Payment, Complaint, Area, ServicePlan, RecoveryTask,ISP,InventoryItem
+from app.models import Customer, Invoice, Payment, Complaint, Area, ServicePlan, RecoveryTask,ISP,InventoryItem,BankAccount
 from app.utils.logging_utils import log_action
 import uuid
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
@@ -760,29 +760,72 @@ async def get_customer_invoices(id, company_id):
         Customer.id == id,
         Customer.company_id == company_id
     ).all()
-    return [{
-        'id': str(invoice.id),
-        'invoice_number': invoice.invoice_number,
-        'billing_start_date': invoice.billing_start_date.isoformat(),
-        'billing_end_date': invoice.billing_end_date.isoformat(),
-        'due_date': invoice.due_date.isoformat(),
-        'total_amount': float(invoice.total_amount),
-        'status': invoice.status
-    } for invoice in invoices]
+    
+    result = []
+    for invoice in invoices:
+        invoice_data = {
+            'id': str(invoice.id),
+            'invoice_number': invoice.invoice_number,
+            'billing_start_date': invoice.billing_start_date.isoformat(),
+            'billing_end_date': invoice.billing_end_date.isoformat(),
+            'due_date': invoice.due_date.isoformat(),
+            'subtotal': float(invoice.subtotal) if invoice.subtotal else 0,
+            'discount_percentage': float(invoice.discount_percentage) if invoice.discount_percentage else 0,
+            'total_amount': float(invoice.total_amount),
+            'invoice_type': invoice.invoice_type or 'Standard',
+            'status': invoice.status,
+            'notes': invoice.notes or '',
+            'generated_by': str(invoice.generated_by) if invoice.generated_by else None,
+            'created_at': invoice.created_at.isoformat() if invoice.created_at else None,
+        }
+        result.append(invoice_data)
+    
+    return result
 
 async def get_customer_payments(id, company_id):
-    payments = Payment.query.join(Invoice).join(Customer).filter(
-        Customer.id == id,
-        Customer.company_id == company_id
-    ).all()
-    return [{
-        'id': str(payment.id),
-        'invoice_id': str(payment.invoice_id),
-        'amount': float(payment.amount),
-        'payment_date': payment.payment_date.isoformat(),
-        'payment_method': payment.payment_method,
-        'status': payment.status
-    } for payment in payments]
+    # Fetch all payments for a customer under a specific company
+    payments = (
+        Payment.query
+        .join(Invoice)
+        .join(Customer)
+        .filter(
+            Customer.id == id,
+            Customer.company_id == company_id
+        )
+        .all()
+    )
+
+    payment_list = []
+
+    for payment in payments:
+        payment_data = {
+            'id': str(payment.id),
+            'invoice_id': str(payment.invoice_id),
+            'invoice_number': payment.invoice.invoice_number if payment.invoice else None,
+            'amount': float(payment.amount) if payment.amount else 0.0,
+            'payment_date': payment.payment_date.isoformat() if payment.payment_date else None,
+            'payment_method': payment.payment_method,
+            'status': payment.status,
+            'transaction_id': payment.transaction_id or '',
+            'failure_reason': payment.failure_reason or '',
+            'payment_proof': payment.payment_proof or ''
+        }
+
+        # Add bank account information if available
+        if payment.bank_account:
+            payment_data['bank_account'] = {
+                'id': str(payment.bank_account.id),
+                'bank_name': payment.bank_account.bank_name,
+                'account_title': payment.bank_account.account_title,
+                'account_number': payment.bank_account.account_number,
+                'iban': payment.bank_account.iban or '',
+                'branch_code': payment.bank_account.branch_code or ''
+            }
+
+        payment_list.append(payment_data)
+
+    return payment_list
+
 
 async def get_customer_complaints(id, company_id):
     complaints = Complaint.query.join(Customer).filter(

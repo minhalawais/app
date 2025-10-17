@@ -279,6 +279,9 @@ def delete_payment(id, company_id, user_role, current_user_id, ip_address, user_
         if not payment:
             raise ValueError(f"Payment with id {id} not found")
 
+        # Store invoice_id before deletion for status update
+        invoice_id = payment.invoice_id
+        
         old_values = {
             'invoice_id': str(payment.invoice_id),
             'amount': float(payment.amount),
@@ -299,8 +302,43 @@ def delete_payment(id, company_id, user_role, current_user_id, ip_address, user_
             except OSError as e:
                 logger.error(f"Error deleting payment proof file: {str(e)}")
 
+        # Delete the payment
         db.session.delete(payment)
         db.session.commit()
+
+        # Update invoice status after payment deletion
+        try:
+            # Get all remaining active payments for this invoice
+            remaining_payments = Payment.query.filter(
+                Payment.invoice_id == invoice_id,
+                Payment.is_active == True,
+                Payment.id != uuid.UUID(id)  # Exclude the deleted payment
+            ).all()
+            
+            # Calculate total paid amount from remaining payments
+            total_paid = sum(p.amount for p in remaining_payments if p.status == 'paid')
+            
+            # Get the invoice
+            invoice = Invoice.query.get(invoice_id)
+            if invoice:
+                if total_paid == 0:
+                    # No payments left, set to pending
+                    invoice.status = 'pending'
+                elif total_paid >= invoice.total_amount:
+                    # Fully paid with remaining payments
+                    invoice.status = 'paid'
+                elif total_paid > 0:
+                    # Some payment remains
+                    invoice.status = 'partially_paid'
+                else:
+                    # No successful payments
+                    invoice.status = 'pending'
+                
+                db.session.commit()
+                
+        except Exception as e:
+            logger.error(f"Error updating invoice status after payment deletion: {str(e)}")
+            # Don't rollback the payment deletion, just log the error
 
         log_action(
             current_user_id,
@@ -309,10 +347,10 @@ def delete_payment(id, company_id, user_role, current_user_id, ip_address, user_
             payment.id,
             old_values,
             None,
-                        ip_address,
+            ip_address,
             user_agent,
             company_id
-)
+        )
 
         return True
     except ValueError as e:

@@ -41,6 +41,8 @@ def invoice_to_dict(invoice):
         'customer_id': str(invoice.customer_id),
         'customer_name': f"{invoice.customer.first_name} {invoice.customer.last_name}" if invoice.customer else "N/A",
         'customer_phone': invoice.customer.phone_1 if invoice.customer else "",
+        'phone_1': invoice.customer.phone_1 if invoice.customer else "",
+        'phone_2': invoice.customer.phone_2 if invoice.customer else "",
         'billing_start_date': invoice.billing_start_date.isoformat(),
         'billing_end_date': invoice.billing_end_date.isoformat(),
         'due_date': invoice.due_date.isoformat(),
@@ -72,52 +74,100 @@ def generate_invoice_number():
         logger.error(f"Error generating invoice number: {str(e)}")
         raise InvoiceError("Failed to generate invoice number")
 
+def validate_invoice_data_by_type(invoice_type, data):
+    """
+    Validate invoice data based on invoice type
+    """
+    errors = []
+    
+    if invoice_type == 'subscription':
+        if not data.get('billing_start_date'):
+            errors.append("Billing start date is required for subscription invoices")
+        if not data.get('billing_end_date'):
+            errors.append("Billing end date is required for subscription invoices")
+    else:
+        # For non-subscription invoices, clear subscription-specific fields
+        if 'billing_start_date' in data:
+            data.pop('billing_start_date', None)
+        if 'billing_end_date' in data:
+            data.pop('billing_end_date', None)
+        if 'discount_percentage' in data:
+            data.pop('discount_percentage', None)
+        if 'discount_amount' in data:
+            data.pop('discount_amount', None)
+    
+    return errors, data
+
 def add_invoice(data, current_user_id, user_role, ip_address, user_agent):
     try:
         # Validate required fields
-        required_fields = ['company_id', 'customer_id', 'billing_start_date', 
-                         'billing_end_date', 'due_date', 'subtotal', 
-                         'discount_percentage', 'total_amount', 'invoice_type']
+        required_fields = ['company_id', 'customer_id', 'due_date', 'subtotal', 'total_amount', 'invoice_type']
+        invoice_type = data.get('invoice_type')
+
+        if invoice_type == 'subscription':
+            required_fields.extend(['billing_start_date', 'billing_end_date'])
+
         for field in required_fields:
             if field not in data:
                 raise ValueError(f"Missing required field: {field}")
 
-        # Parse and validate dates
-        date_fields = ['billing_start_date', 'billing_end_date', 'due_date']
+        # Validate type-specific and clean data
+        validation_errors, cleaned_data = validate_invoice_data_by_type(invoice_type, data.copy())
+        if validation_errors:
+            raise ValueError("; ".join(validation_errors))
+
+        # Parse dates
+        date_fields = ['due_date']
+        if invoice_type == 'subscription':
+            date_fields.extend(['billing_start_date', 'billing_end_date'])
+
         parsed_dates = {}
         for field in date_fields:
-            try:
-                parsed_dates[field] = datetime.fromisoformat(data[field].rstrip('Z'))
-            except ValueError:
-                raise ValueError(f"Invalid date format for {field}")
-        
-        company_id = uuid.UUID(data['company_id'])
+            if field in cleaned_data:
+                try:
+                    parsed_dates[field] = datetime.fromisoformat(cleaned_data[field].rstrip('Z'))
+                except ValueError:
+                    raise ValueError(f"Invalid date format for {field}")
 
-        new_invoice = Invoice(
-            company_id=company_id,
-            invoice_number=generate_invoice_number(),
-            customer_id=uuid.UUID(data['customer_id']),
-            billing_start_date=parsed_dates['billing_start_date'],
-            billing_end_date=parsed_dates['billing_end_date'],
-            due_date=parsed_dates['due_date'],
-            subtotal=data['subtotal'],
-            discount_percentage=data['discount_percentage'],
-            total_amount=data['total_amount'],
-            invoice_type=data['invoice_type'],
-            notes=data.get('notes'),
-            generated_by=current_user_id,
-            status='pending',
-            is_active=True
-        )
-        
+        company_id = uuid.UUID(cleaned_data['company_id'])
+
+        # Base invoice payload
+        invoice_data = {
+            'company_id': company_id,
+            'invoice_number': generate_invoice_number(),
+            'customer_id': uuid.UUID(cleaned_data['customer_id']),
+            'due_date': parsed_dates['due_date'],
+            'subtotal': cleaned_data['subtotal'],
+            'total_amount': cleaned_data['total_amount'],
+            'invoice_type': invoice_type,
+            'notes': cleaned_data.get('notes'),
+            'generated_by': current_user_id,
+            'status': 'pending',
+            'is_active': True
+        }
+
+        if invoice_type == 'subscription':
+            invoice_data['billing_start_date'] = parsed_dates['billing_start_date']
+            invoice_data['billing_end_date'] = parsed_dates['billing_end_date']
+            invoice_data['discount_percentage'] = cleaned_data.get('discount_percentage', 0)
+        else:
+            invoice_data['billing_start_date'] = parsed_dates['due_date']
+            invoice_data['billing_end_date'] = parsed_dates['due_date']
+            invoice_data['discount_percentage'] = 0
+
+        new_invoice = Invoice(**invoice_data)
         db.session.add(new_invoice)
         db.session.commit()
 
-        # Prepare data for logging by converting datetime objects to strings
-        log_data = data.copy()
+        # prepare log
+        log_data = cleaned_data.copy()
         for field in date_fields:
             if field in log_data:
                 log_data[field] = parsed_dates[field].isoformat()
+        # Log the normalized dates for non-subscription
+        if invoice_type != 'subscription':
+            log_data['billing_start_date'] = invoice_data['billing_start_date'].isoformat()
+            log_data['billing_end_date'] = invoice_data['billing_end_date'].isoformat()
 
         log_action(
             current_user_id,
@@ -125,7 +175,7 @@ def add_invoice(data, current_user_id, user_role, ip_address, user_agent):
             'invoices',
             new_invoice.id,
             None,
-            log_data,  # Use the modified data with string dates
+            log_data,
             ip_address,
             user_agent,
             str(company_id)
@@ -729,6 +779,8 @@ def get_invoices_page(company_id, user_role, employee_id, page=1, page_size=20, 
         Invoice.notes,
         Invoice.status,
         Customer.internet_id,
+        Customer.phone_1,
+        Customer.phone_2,
         (Customer.first_name + ' ' + Customer.last_name).label('customer_name'),
     ).join(Customer, Customer.id == Invoice.customer_id)
 
@@ -778,8 +830,11 @@ def get_invoices_page(company_id, user_role, employee_id, page=1, page_size=20, 
             'customer_id': str(row.customer_id) if row.customer_id else None,
             'internet_id': row.internet_id,
             'customer_name': row.customer_name,
+            'customer_phone': row.phone_1 or "",  # For backward compatibility
+            'phone_1': row.phone_1 or "",
+            'phone_2': row.phone_2 or "",
             'billing_start_date': row.billing_start_date.isoformat() if row.billing_start_date else None,
-            'billing_end_date': row.billing_end_date.isoformat() if row.billing_end_date else None,
+            'billing_end_date': row.billing_end_date.isoformat() if row.billing_start_date else None,
             'due_date': row.due_date.isoformat() if row.due_date else None,
             'subtotal': float(row.subtotal) if row.subtotal is not None else 0,
             'discount_percentage': float(row.discount_percentage) if row.discount_percentage is not None else 0,

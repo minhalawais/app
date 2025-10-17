@@ -12,6 +12,10 @@ from sqlalchemy.dialects.postgresql import UUID
 
 logger = logging.getLogger(__name__)
 
+def _signed_payment_amount():
+    # Refund invoices should subtract from collections
+    return case((Invoice.invoice_type == 'refund', -Payment.amount), else_=Payment.amount)
+
 def get_executive_summary_data(company_id):
     if not company_id:
         return {'error': 'Invalid company_id. Please provide a valid company ID.'}
@@ -651,7 +655,8 @@ def get_recovery_collections_data(company_id):
         ).outerjoin(total_payments_subquery, Invoice.id == total_payments_subquery.c.invoice_id
         ).filter(Invoice.company_id == company_id, Invoice.status != 'paid').scalar() or 0
 
-        total_recovered = db.session.query(func.sum(Payment.amount)
+        total_recovered = db.session.query(func.sum(_signed_payment_amount())
+        ).join(Invoice, Payment.invoice_id == Invoice.id
         ).filter(Payment.company_id == company_id).scalar() or 0
 
         total_invoiced = total_recovered + total_outstanding
@@ -743,8 +748,9 @@ def get_bank_account_analytics_data(company_id, filters=None):
             BankAccount.bank_name,
             BankAccount.account_number,
             func.date_trunc('month', Payment.payment_date).label('month'),
-            func.sum(Payment.amount).label('total_amount')
-        ).join(Payment
+            func.coalesce(func.sum(_signed_payment_amount()), 0).label('total_amount')
+        ).join(Payment, BankAccount.id == Payment.bank_account_id
+        ).join(Invoice, Payment.invoice_id == Invoice.id
         ).filter(Payment.company_id == company_id)
         
         if filters.get('start_date'):
@@ -770,8 +776,8 @@ def get_bank_account_analytics_data(company_id, filters=None):
             BankAccount.account_number,
             func.sum(case((Invoice.status == 'paid', Invoice.total_amount), else_=0)).label('collected'),
             func.sum(case((Invoice.status != 'paid', Invoice.total_amount), else_=0)).label('outstanding')
-        ).join(Payment, BankAccount.id == Payment.bank_account_id, isouter=True
-        ).join(Invoice, Payment.invoice_id == Invoice.id, isouter=True
+        ).outerjoin(Payment, BankAccount.id == Payment.bank_account_id
+        ).join(Invoice, Payment.invoice_id == Invoice.id
         ).filter(BankAccount.company_id == company_id
         ).group_by(BankAccount.bank_name, BankAccount.account_number).all()
         
@@ -789,10 +795,10 @@ def get_bank_account_analytics_data(company_id, filters=None):
             BankAccount.account_number,
             Customer.first_name,
             Customer.last_name,
-            func.sum(Payment.amount).label('total_paid')
-        ).join(Payment
-        ).join(Invoice
-        ).join(Customer
+            func.coalesce(func.sum(_signed_payment_amount()), 0).label('total_paid')
+        ).join(Payment, BankAccount.id == Payment.bank_account_id
+        ).join(Invoice, Payment.invoice_id == Invoice.id
+        ).join(Customer, Invoice.customer_id == Customer.id
         ).filter(Payment.company_id == company_id)
         
         if filters.get('start_date'):
@@ -802,7 +808,7 @@ def get_bank_account_analytics_data(company_id, filters=None):
         
         top_customers = top_customers.group_by(
             BankAccount.bank_name, BankAccount.account_number, Customer.first_name, Customer.last_name
-        ).order_by(func.sum(Payment.amount).desc()).limit(10).all()
+        ).order_by(func.sum(_signed_payment_amount()).desc()).limit(10).all()
         
         top_customers_data = []
         for bank_name, account_number, first_name, last_name, total_paid in top_customers:
@@ -816,9 +822,10 @@ def get_bank_account_analytics_data(company_id, filters=None):
         avg_transaction = db.session.query(
             BankAccount.bank_name,
             BankAccount.account_number,
-            func.avg(Payment.amount).label('avg_amount'),
+            func.avg(_signed_payment_amount()).label('avg_amount'),
             func.count(Payment.id).label('transaction_count')
-        ).join(Payment
+        ).join(Payment, BankAccount.id == Payment.bank_account_id
+        ).join(Invoice, Payment.invoice_id == Invoice.id
         ).filter(Payment.company_id == company_id)
         
         if filters.get('start_date'):
@@ -842,7 +849,8 @@ def get_bank_account_analytics_data(company_id, filters=None):
         payment_method_dist = db.session.query(
             Payment.payment_method,
             func.count(Payment.id).label('count'),
-            func.sum(Payment.amount).label('amount')
+            func.coalesce(func.sum(_signed_payment_amount()), 0).label('amount')
+        ).join(Invoice, Payment.invoice_id == Invoice.id
         ).filter(Payment.company_id == company_id)
         
         if filters.get('start_date'):
@@ -865,8 +873,9 @@ def get_bank_account_analytics_data(company_id, filters=None):
             BankAccount.bank_name,
             BankAccount.account_number,
             func.date_trunc('month', Payment.payment_date).label('month'),
-            func.sum(Payment.amount).label('amount')
-        ).join(Payment
+            func.coalesce(func.sum(_signed_payment_amount()), 0).label('amount')
+        ).join(Payment, BankAccount.id == Payment.bank_account_id
+        ).join(Invoice, Payment.invoice_id == Invoice.id
         ).filter(Payment.company_id == company_id)
         
         if filters.get('start_date'):
@@ -887,13 +896,13 @@ def get_bank_account_analytics_data(company_id, filters=None):
             })
         
         # 7. Collection Metrics
-        total_company_revenue = db.session.query(func.sum(Payment.amount)).filter(
+        total_company_revenue = db.session.query(func.sum(_signed_payment_amount())).filter(
             Payment.company_id == company_id
         ).scalar() or 1  # Avoid division by zero
         
         collection_metrics = []
         for bank_account in bank_accounts:
-            account_revenue = db.session.query(func.sum(Payment.amount)).filter(
+            account_revenue = db.session.query(func.sum(_signed_payment_amount())).filter(
                 Payment.bank_account_id == bank_account.id,
                 Payment.company_id == company_id
             ).scalar() or 0
@@ -1035,7 +1044,9 @@ def get_financial_kpis(company_id, start_date=None, end_date=None, bank_account_
         if invoice_status and invoice_status != 'all':
             revenue_query = revenue_query.filter(Invoice.status == invoice_status)
 
-        collections_query = db.session.query(func.sum(Payment.amount)).filter(
+        collections_query = db.session.query(func.coalesce(func.sum(_signed_payment_amount()), 0)).join(
+            Invoice, Payment.invoice_id == Invoice.id
+        ).filter(
             Payment.company_id == company_id,
             Payment.is_active == True,
             Payment.status == 'paid'
@@ -1120,7 +1131,8 @@ def get_cash_flow_analysis(company_id, start_date=None, end_date=None, bank_acco
         # Get monthly collections (inflow)
         monthly_collections = db.session.query(
             func.date_trunc('month', Payment.payment_date).label('month'),
-            func.sum(Payment.amount).label('inflow')
+            func.coalesce(func.sum(_signed_payment_amount()), 0).label('inflow')
+        ).join(Invoice, Payment.invoice_id == Invoice.id
         ).filter(
             Payment.company_id == company_id,
             Payment.is_active == True,
@@ -1226,7 +1238,7 @@ def get_cash_flow_analysis(company_id, start_date=None, end_date=None, bank_acco
         # Inflow breakdown by payment method
         inflow_methods = db.session.query(
             Payment.payment_method,
-            func.sum(Payment.amount).label('amount')
+            func.coalesce(func.sum(_signed_payment_amount()), 0).label('amount')
         ).filter(
             Payment.company_id == company_id,
             Payment.is_active == True,
@@ -1477,8 +1489,9 @@ def get_bank_account_performance(company_id, start_date=None, end_date=None, ban
         collections_query = db.session.query(
             BankAccount.bank_name,
             BankAccount.account_number,
-            func.sum(Payment.amount).label('collections')
+            func.coalesce(func.sum(_signed_payment_amount()), 0).label('collections')
         ).join(Payment, BankAccount.id == Payment.bank_account_id
+        ).join(Invoice, Payment.invoice_id == Invoice.id
         ).filter(
             BankAccount.company_id == company_id,
             BankAccount.is_active == True,
@@ -1635,7 +1648,8 @@ def get_collections_analysis(company_id, start_date=None, end_date=None, bank_ac
         collection_trends = db.session.query(
             func.date_trunc('month', Payment.payment_date).label('month'),
             func.count(Payment.id).label('payment_count'),
-            func.sum(Payment.amount).label('collection_amount')
+            func.coalesce(func.sum(_signed_payment_amount()), 0).label('collection_amount')
+        ).join(Invoice, Payment.invoice_id == Invoice.id
         ).filter(
             Payment.company_id == company_id,
             Payment.is_active == True,
@@ -1743,7 +1757,8 @@ def get_cash_payments_data(company_id, start_date=None, end_date=None):
     try:
         # Get cash collections (payments without bank_account_id)
         cash_collections_query = db.session.query(
-            func.sum(Payment.amount).label('collections')
+            func.coalesce(func.sum(_signed_payment_amount()), 0).label('collections')
+        ).join(Invoice, Payment.invoice_id == Invoice.id
         ).filter(
             Payment.company_id == company_id,
             Payment.is_active == True,
@@ -1817,3 +1832,221 @@ def get_cash_payments_data(company_id, start_date=None, end_date=None):
             'extra_income': 0,
             'net_flow': 0
         }
+
+def _refund_signed_amount():
+    # Treat invoice payments on refund invoices as negative (debit)
+    return case((Invoice.invoice_type == 'refund', -Payment.amount), else_=Payment.amount)
+def _refund_signed_amount():
+    # Treat invoice payments on refund invoices as negative (debit)
+    return case((Invoice.invoice_type == 'refund', -Payment.amount), else_=Payment.amount)
+
+def get_ledger_data(company_id, filters=None):
+    """
+    Returns a unified list of ledger items across:
+      - Invoice Payments (credits; refunds are debits)
+      - ISP Payments (debits)
+      - Business Expenses (debits)
+      - Extra Incomes (credits)
+    Applies filters and sorts by time descending.
+    """
+    try:
+      if filters is None:
+          filters = {}
+
+      start_date = filters.get('start_date')
+      end_date = filters.get('end_date')
+      bank_account_id = filters.get('bank_account_id')
+      payment_method = filters.get('payment_method')
+      invoice_status = filters.get('invoice_status')
+      isp_payment_type = filters.get('isp_payment_type')
+
+      # Build a bank account lookup map
+      bank_accounts = BankAccount.query.filter_by(company_id=company_id, is_active=True).all()
+      bank_account_map = {
+          str(acc.id): f"{acc.bank_name} - {acc.account_number}" 
+          for acc in bank_accounts
+      }
+
+      # Invoice payments (collections)
+      p_query = db.session.query(
+          Payment.id.label('id'),
+          Payment.payment_date.label('ts'),
+          _refund_signed_amount().label('signed_amount'),
+          Payment.amount.label('amount'),
+          Payment.payment_method.label('method'),
+          Payment.status.label('status'),
+          Payment.transaction_id.label('reference'),
+          Payment.bank_account_id.label('bank_id'),
+          Invoice.invoice_number.label('invoice_number'),
+          Invoice.invoice_type.label('invoice_type'),
+          Customer.first_name.label('customer_fname'),
+          Customer.last_name.label('customer_lname'),
+      ).join(Invoice, Payment.invoice_id == Invoice.id
+      ).join(Customer, Invoice.customer_id == Customer.id
+      ).filter(
+          Payment.company_id == company_id,
+          Payment.is_active == True,
+          Payment.status.in_(['paid','refunded'])  # include refunded
+      )
+      if start_date: p_query = p_query.filter(Payment.payment_date >= start_date)
+      if end_date: p_query = p_query.filter(Payment.payment_date <= end_date)
+      if bank_account_id and bank_account_id != 'all':
+          p_query = p_query.filter(or_(
+              Payment.bank_account_id == uuid.UUID(bank_account_id),
+              Payment.bank_account_id.is_(None)  # include cash when desired
+          ))
+      if payment_method and payment_method != 'all':
+          p_query = p_query.filter(Payment.payment_method == payment_method)
+      if invoice_status and invoice_status != 'all':
+          p_query = p_query.filter(Invoice.status == invoice_status)
+
+      payments_rows = p_query.all()
+
+      # ISP Payments (debits)
+      isp_query = db.session.query(
+          ISPPayment.id, ISPPayment.payment_date, ISPPayment.amount,
+          ISPPayment.payment_method, ISPPayment.status,
+          ISPPayment.reference_number, ISPPayment.bank_account_id, 
+          ISPPayment.payment_type, ISPPayment.description
+      ).filter(
+          ISPPayment.company_id == company_id,
+          ISPPayment.is_active == True
+      )
+      if start_date: isp_query = isp_query.filter(ISPPayment.payment_date >= start_date)
+      if end_date: isp_query = isp_query.filter(ISPPayment.payment_date <= end_date)
+      if bank_account_id and bank_account_id != 'all':
+          isp_query = isp_query.filter(or_(
+              ISPPayment.bank_account_id == uuid.UUID(bank_account_id),
+              ISPPayment.bank_account_id.is_(None)
+          ))
+      if payment_method and payment_method != 'all':
+          isp_query = isp_query.filter(ISPPayment.payment_method == payment_method)
+      if isp_payment_type and isp_payment_type != 'all':
+          isp_query = isp_query.filter(ISPPayment.payment_type == isp_payment_type)
+      isp_rows = isp_query.all()
+
+      # Expenses (debits)
+      ex_query = db.session.query(
+          Expense.id, Expense.expense_date, Expense.amount,
+          Expense.payment_method, Expense.vendor_payee, 
+          Expense.description, Expense.bank_account_id
+      ).filter(
+          Expense.company_id == company_id,
+          Expense.is_active == True
+      )
+      if start_date: ex_query = ex_query.filter(Expense.expense_date >= start_date)
+      if end_date: ex_query = ex_query.filter(Expense.expense_date <= end_date)
+      if bank_account_id and bank_account_id != 'all':
+          ex_query = ex_query.filter(or_(
+              Expense.bank_account_id == uuid.UUID(bank_account_id),
+              Expense.bank_account_id.is_(None)
+          ))
+      if payment_method and payment_method != 'all':
+          ex_query = ex_query.filter(Expense.payment_method == payment_method)
+      expense_rows = ex_query.all()
+
+      # Extra Income (credits)
+      ei_query = db.session.query(
+          ExtraIncome.id, ExtraIncome.income_date, ExtraIncome.amount,
+          ExtraIncome.payment_method, ExtraIncome.payer, 
+          ExtraIncome.description, ExtraIncome.bank_account_id
+      ).filter(
+          ExtraIncome.company_id == company_id,
+          ExtraIncome.is_active == True
+      )
+      if start_date: ei_query = ei_query.filter(ExtraIncome.income_date >= start_date)
+      if end_date: ei_query = ei_query.filter(ExtraIncome.income_date <= end_date)
+      if bank_account_id and bank_account_id != 'all':
+          ei_query = ei_query.filter(or_(
+              ExtraIncome.bank_account_id == uuid.UUID(bank_account_id),
+              ExtraIncome.bank_account_id.is_(None)
+          ))
+      if payment_method and payment_method != 'all':
+          ei_query = ei_query.filter(ExtraIncome.payment_method == payment_method)
+      extra_rows = ei_query.all()
+
+      # Build unified items
+      items = []
+
+      for r in payments_rows:
+          is_refund = (r.invoice_type or '').lower() == 'refund' or (r.status or '').lower() == 'refunded'
+          bank_acc_name = bank_account_map.get(str(r.bank_id)) if r.bank_id else None
+          items.append({
+              'id': str(r.id),
+              'date': r.ts.isoformat() if r.ts else None,
+              'type': 'refund' if is_refund else 'invoice_payment',
+              'reference': r.reference or r.invoice_number,
+              'description': f"Invoice payment - {r.customer_fname or ''} {r.customer_lname or ''}".strip(),
+              'method': r.method,
+              'bank_account': bank_acc_name,
+              'amount': float(r.amount or 0),
+              'direction': 'debit' if is_refund else 'credit',
+              'status': r.status or 'paid',
+          })
+
+      for r in isp_rows:
+          bank_acc_name = bank_account_map.get(str(r.bank_account_id)) if r.bank_account_id else None
+          items.append({
+              'id': str(r.id),
+              'date': r.payment_date.isoformat() if r.payment_date else None,
+              'type': 'isp_payment',
+              'reference': r.reference_number,
+              'description': r.description or (r.payment_type or 'ISP payment'),
+              'method': r.payment_method,
+              'bank_account': bank_acc_name,
+              'amount': float(r.amount or 0),
+              'direction': 'debit',
+              'status': r.status or 'completed',
+          })
+
+      for r in expense_rows:
+          bank_acc_name = bank_account_map.get(str(r.bank_account_id)) if r.bank_account_id else None
+          items.append({
+              'id': str(r.id),
+              'date': r.expense_date.isoformat() if r.expense_date else None,
+              'type': 'expense',
+              'reference': r.vendor_payee,
+              'description': r.description,
+              'method': r.payment_method,
+              'bank_account': bank_acc_name,
+              'amount': float(r.amount or 0),
+              'direction': 'debit',
+              'status': 'posted',
+          })
+
+      for r in extra_rows:
+          bank_acc_name = bank_account_map.get(str(r.bank_account_id)) if r.bank_account_id else None
+          items.append({
+              'id': str(r.id),
+              'date': r.income_date.isoformat() if r.income_date else None,
+              'type': 'extra_income',
+              'reference': r.payer,
+              'description': r.description,
+              'method': r.payment_method,
+              'bank_account': bank_acc_name,
+              'amount': float(r.amount or 0),
+              'direction': 'credit',
+              'status': 'posted',
+          })
+
+      # Sort by time descending
+      items.sort(key=lambda x: (x.get('date') or ''), reverse=True)
+
+      # Return bank accounts for filters
+      bank_accounts_list = [
+          {'id': str(acc.id), 'name': f"{acc.bank_name} - {acc.account_number}"} 
+          for acc in bank_accounts
+      ]
+
+      # Quick stats for footer (optional; UI computes it too)
+      credits = sum(i['amount'] for i in items if i['direction'] == 'credit')
+      debits = sum(i['amount'] for i in items if i['direction'] == 'debit')
+
+      return {
+          'items': items,
+          'bank_accounts': bank_accounts_list,
+          'stats': { 'credits': credits, 'debits': debits, 'net': credits - debits, 'count': len(items) }
+      }
+    except Exception as e:
+      logger.error(f"Error building ledger data: {str(e)}")
+      return { 'items': [], 'bank_accounts': [], 'stats': { 'credits': 0, 'debits': 0, 'net': 0, 'count': 0 } }

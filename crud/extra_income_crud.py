@@ -116,7 +116,8 @@ def delete_extra_income(id, company_id, user_role, current_user_id, ip_address, 
         if not income:
             raise ValueError(f"Extra income with id {id} not found")
 
-        income.is_active = False
+        # Actually delete the record
+        db.session.delete(income)
         db.session.commit()
         return True
     except Exception as e:
@@ -164,6 +165,31 @@ def add_extra_income_type(data, user_role, current_user_id, ip_address, user_age
         logger.error(f"Error adding extra income type: {str(e)}")
         db.session.rollback()
         raise ExtraIncomeTypeError("Failed to create extra income type")
+
+def update_extra_income_type(id, data, company_id, user_role, current_user_id, ip_address, user_agent):
+    try:
+        if user_role == 'super_admin':
+            income_type = ExtraIncomeType.query.get(id)
+        else:
+            income_type = ExtraIncomeType.query.filter_by(id=id, company_id=company_id).first()
+
+        if not income_type:
+            raise ValueError(f"Extra income type with id {id} not found")
+
+        # Update fields
+        if 'name' in data:
+            income_type.name = data['name']
+        if 'description' in data:
+            income_type.description = data['description']
+        if 'is_active' in data:
+            income_type.is_active = data['is_active']
+
+        db.session.commit()
+        return income_type
+    except Exception as e:
+        logger.error(f"Error updating extra income type {id}: {str(e)}")
+        db.session.rollback()
+        raise ExtraIncomeTypeError("Failed to update extra income type")
 
 def delete_extra_income_type(id, company_id, user_role, current_user_id, ip_address, user_agent):
     try:

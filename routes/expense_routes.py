@@ -93,6 +93,23 @@ def add_expense_type():
         print('Error: ',e)
         return jsonify({'error': 'Failed to add expense type', 'message': str(e)}), 400
 
+@main.route('/expense-types/update/<string:id>', methods=['PUT'])
+@jwt_required()
+def update_expense_type(id):
+    claims = get_jwt()
+    company_id = claims['company_id']
+    user_role = claims['role']
+    current_user_id = get_jwt_identity()
+    data = request.json
+    
+    try:
+        updated_expense_type = expense_crud.update_expense_type(id, data, company_id, user_role, current_user_id, request.remote_addr, request.headers.get('User-Agent'))
+        if updated_expense_type:
+            return jsonify({'message': 'Expense type updated successfully'}), 200
+        return jsonify({'message': 'Expense type not found'}), 404
+    except Exception as e:
+        return jsonify({'error': 'Failed to update expense type', 'message': str(e)}), 400
+
 @main.route('/expense-types/delete/<string:id>', methods=['DELETE'])
 @jwt_required()
 def delete_expense_type(id):
