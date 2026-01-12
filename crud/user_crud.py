@@ -153,25 +153,35 @@ def update_profile_picture(user_id, file, ip_address, user_agent):
             return {'success': False, 'error': 'User not found'}
         
         # Create upload directory if it doesn't exist
-        os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+        # Go up 3 levels: file -> crud -> app -> api
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        upload_dir = os.path.join(project_root, UPLOAD_FOLDER)
+        os.makedirs(upload_dir, exist_ok=True)
         
         # Delete old picture if exists
-        if user.picture and os.path.exists(user.picture):
-            try:
-                os.remove(user.picture)
-            except Exception as e:
-                logger.warning(f"Could not delete old profile picture: {e}")
+        if user.picture:
+            # Construct full path for old picture
+            old_picture_path = os.path.join(project_root, user.picture)
+            if os.path.exists(old_picture_path):
+                try:
+                    os.remove(old_picture_path)
+                except Exception as e:
+                    logger.warning(f"Could not delete old profile picture: {e}")
         
         # Generate unique filename
         file_extension = file.filename.rsplit('.', 1)[1].lower()
         filename = f"{user_id}_{uuid.uuid4().hex[:8]}.{file_extension}"
-        filepath = os.path.join(UPLOAD_FOLDER, filename)
         
-        # Save file
-        file.save(filepath)
+        # Save file using absolute path
+        abs_filepath = os.path.join(upload_dir, filename)
+        file.save(abs_filepath)
+        
+        # Store relative path in DB
+        # UPLOAD_FOLDER is 'uploads/profile_pictures'
+        relative_path = f"{UPLOAD_FOLDER}/{filename}"
         
         # Update user record
-        user.picture = filepath
+        user.picture = relative_path
         db.session.commit()
         
         log_action(

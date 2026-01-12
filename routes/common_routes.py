@@ -13,7 +13,8 @@ def serve_uploaded_file(filename):
         
         current_dir = os.path.dirname(os.path.abspath(__file__)) # api/app/routes
         app_dir = os.path.dirname(current_dir) # api/app
-        uploads_path = os.path.join(app_dir, 'uploads')
+        api_dir = os.path.dirname(app_dir) # api
+        uploads_path = os.path.join(api_dir, 'uploads')
         
         return send_from_directory(uploads_path, filename)
     except FileNotFoundError:

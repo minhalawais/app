@@ -30,7 +30,9 @@ def save_employee_file(file, employee_id, file_type):
         raise ValueError(f"File type not allowed. Allowed types: {', '.join(ALLOWED_EXTENSIONS)}")
     
     # Create directory if it doesn't exist
-    upload_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), UPLOAD_FOLDER, str(employee_id))
+    # Go up 3 levels: file -> crud -> app -> api
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    upload_dir = os.path.join(project_root, UPLOAD_FOLDER, str(employee_id))
     os.makedirs(upload_dir, exist_ok=True)
     
     # Create unique filename
