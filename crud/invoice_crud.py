@@ -1049,12 +1049,14 @@ def get_invoices_page(company_id, user_role, employee_id, page=1, page_size=20, 
     base = _apply_role_scope(base, company_id, user_role, employee_id)
 
     if q:
+        q = q.strip()
         like = f"%{q}%"
         base = base.filter(or_(
             Invoice.invoice_number.ilike(like),
             Customer.internet_id.ilike(like),
             Customer.first_name.ilike(like),
             Customer.last_name.ilike(like),
+            func.concat(Customer.first_name, ' ', Customer.last_name).ilike(like),
             Invoice.status.ilike(like),
         ))
     # sorting

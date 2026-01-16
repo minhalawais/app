@@ -1,3 +1,4 @@
+from decimal import Decimal
 from app import db
 from app.models import Customer, Invoice, Payment, Complaint, Area, SubZone, ServicePlan, RecoveryTask, ISP, InventoryItem, BankAccount, CustomerPackage, InvoiceLineItem
 from app.utils.logging_utils import log_action
@@ -844,7 +845,18 @@ async def get_customer_details(id, company_id):
         avg_monthly_payment = total_amount_paid / len(payments) if payments else 0
         # All payments in this list are already 'paid' status, so reliability = 100% if any payments exist
         payment_reliability_score = 100 if payments else 0
-        outstanding_balance = sum(invoice.total_amount for invoice in invoices if invoice.status == 'pending')
+        # Calculate outstanding: sum of unpaid/partially paid invoice amounts minus payments made
+        outstanding_balance = Decimal('0.00')
+        for invoice in invoices:
+            if invoice.status in ['pending', 'partially_paid', 'overdue']:
+                # Get total paid for this invoice - compare as strings to handle UUID objects
+                invoice_paid = sum(
+                    p.amount for p in payments 
+                    if str(p.invoice_id) == str(invoice.id)
+                )
+                outstanding_balance += invoice.total_amount - (invoice_paid or Decimal('0.00'))
+        # Convert to float for JSON serialization
+        outstanding_balance = float(outstanding_balance)
         avg_bill_amount = sum(invoice.total_amount for invoice in invoices) / len(invoices) if invoices else 0
         
         # Safe payment method calculation

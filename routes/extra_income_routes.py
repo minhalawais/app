@@ -19,7 +19,8 @@ def save_payment_proof(file, income_id):
         raise ValueError("Invalid file type")
     
     # Create directory if not exists
-    upload_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), UPLOAD_FOLDER)
+    # Navigate up from api/app/routes -> api/app -> api
+    upload_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), UPLOAD_FOLDER)
     os.makedirs(upload_dir, exist_ok=True)
     
     ext = file.filename.rsplit('.', 1)[1].lower()

@@ -56,7 +56,6 @@ from .whatsapp_routes import whatsapp_bp  # New WhatsApp blueprint import
 # Assuming 'monitoring_bp' is from a 'monitoring_routes' module, adding it here
 
 # Re-adding the specific import from employee_portal if it's still needed
-from .employee_portal import *
 from .common_routes import common_bp
 
 main.register_blueprint(whatsapp_bp)

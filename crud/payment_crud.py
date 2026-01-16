@@ -349,17 +349,27 @@ def update_payment(id, data, company_id, user_role, current_user_id, ip_address,
                 logger.error(f"Error updating payment proof: {str(e)}")
                 raise PaymentError("Failed to update payment proof")
 
-        # Update invoice status based on payment status
+        # Update invoice status based on total paid amount
         if payment.status == 'paid':
             invoice = Invoice.query.get(payment.invoice_id)
             if invoice:
-                invoice.status = 'paid'
+                # Calculate total paid from all active paid payments for this invoice
+                total_paid = db.session.query(func.sum(Payment.amount)).filter(
+                    Payment.invoice_id == invoice.id,
+                    Payment.is_active == True,
+                    Payment.status == 'paid'
+                ).scalar() or Decimal('0.00')
                 
-                # Trigger Commission Service if invoice is PAID
-                try:
-                    CommissionService.generate_connection_commission(invoice.id)
-                except Exception as e:
-                    logger.error(f"Failed to trigger commission service for payment {payment.id}: {e}")
+                # Set invoice status based on total paid vs total amount
+                if total_paid >= invoice.total_amount:
+                    invoice.status = 'paid'
+                    # Trigger Commission Service only if invoice is FULLY PAID
+                    try:
+                        CommissionService.generate_connection_commission(invoice.id)
+                    except Exception as e:
+                        logger.error(f"Failed to trigger commission service for payment {payment.id}: {e}")
+                elif total_paid > Decimal('0.00'):
+                    invoice.status = 'partially_paid'
         elif payment.status in ['failed', 'cancelled', 'refunded']:
             invoice = Invoice.query.get(payment.invoice_id)
             if invoice and invoice.status == 'paid':

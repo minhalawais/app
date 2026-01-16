@@ -1049,7 +1049,7 @@ async def public_customer_lookup():
         
         invoice_data = []
         for inv in invoices:
-            paid = sum(float(p.amount) for p in inv.payments if p.status == 'verified') if inv.payments else 0
+            paid = sum(float(p.amount) for p in inv.payments if p.status == 'paid' and p.is_active) if inv.payments else 0
             invoice_data.append({
                 'id': str(inv.id),
                 'invoice_number': inv.invoice_number,
@@ -1094,7 +1094,7 @@ async def public_customer_lookup():
         
         # Calculate totals
         total_due = sum(inv['remaining'] for inv in invoice_data if inv['status'] != 'paid')
-        total_paid = sum(float(p.amount) for p in payments if p.status == 'verified')
+        total_paid = sum(float(p.amount) for p in payments if p.status == 'paid' and p.is_active)
         
         # Return sanitized customer data
         return jsonify({
