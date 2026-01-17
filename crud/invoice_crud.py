@@ -611,6 +611,11 @@ def get_enhanced_invoice_by_id(id, company_id, user_role):
             invoice = db.session.query(Invoice).options(
                 joinedload(Invoice.customer)
             ).filter(Invoice.id == id, Invoice.company_id == company_id).first()
+        else:
+            # Default for other roles (manager, employee, technician, etc.) - filter by company
+            invoice = db.session.query(Invoice).options(
+                joinedload(Invoice.customer)
+            ).filter(Invoice.id == id, Invoice.company_id == company_id).first()
 
         if not invoice:
             return None
@@ -703,7 +708,8 @@ def get_enhanced_invoice_by_id(id, company_id, user_role):
             service_plan_name = ', '.join([li.get('description', '') for li in line_items_list if li.get('description')])
         
         # Fallback: get from CustomerPackage if no line items or empty service_plan_name
-        if not service_plan_name or service_plan_name == "N/A" or not line_items_list:
+        # ONLY for subscription invoices - for others, we want them to be empty if no distinct items exist
+        if (not service_plan_name or service_plan_name == "N/A" or not line_items_list) and invoice.invoice_type == 'subscription':
             try:
                 customer_packages = CustomerPackage.query.filter_by(
                     customer_id=invoice.customer_id,
