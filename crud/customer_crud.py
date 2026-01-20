@@ -514,7 +514,7 @@ async def update_customer(id, data, company_id, user_role, current_user_id, ip_a
         # List of fields that should NOT be updated (read-only/computed fields)
         read_only_fields = [
             'area', 'isp', 'service_plan', 'servicePlanPrice', 'created_at', 
-            'updated_at', 'id', 'company_id', 'company', 'packages', 'service_plan_ids',
+            'updated_at', 'id', 'company_id', 'company', 'packages',
             'sub_zone' 
         ]
 
@@ -570,9 +570,42 @@ async def update_customer(id, data, company_id, user_role, current_user_id, ip_a
                 else:
                     setattr(customer, key, bool(value))
             
-            # Handle all other fields
             else:
                 setattr(customer, key, value)
+
+        # --- SYNC CUSTOMER PACKAGES ---
+        from app.crud import customer_package_crud
+        
+        service_plan_ids_raw = data.get('service_plan_ids', [])
+        # Handle string vs array
+        if isinstance(service_plan_ids_raw, str):
+            service_plan_ids = [service_plan_ids_raw] if service_plan_ids_raw.strip() else []
+        else:
+            service_plan_ids = service_plan_ids_raw or []
+        
+        # Normalize: extract IDs if objects were passed
+        normalized_ids = []
+        for item in service_plan_ids:
+            if isinstance(item, dict):
+                plan_id = item.get('service_plan_id')
+                if plan_id:
+                    normalized_ids.append(str(plan_id))
+            elif item:
+                normalized_ids.append(str(item))
+        
+        if normalized_ids:
+            try:
+                customer_package_crud.sync_customer_packages(
+                    customer_id=id,
+                    service_plan_ids=normalized_ids,
+                    company_id=company_id,
+                    current_user_id=current_user_id,
+                    ip_address=ip_address,
+                    user_agent=user_agent
+                )
+                logger.info(f"Synced packages for customer {id}: {normalized_ids}")
+            except customer_package_crud.CustomerPackageError as e:
+                logger.warning(f"Package sync warning for customer {id}: {e}")
 
         db.session.commit()
 

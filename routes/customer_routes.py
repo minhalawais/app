@@ -219,6 +219,12 @@ async def update_existing_customer(id):
     data = request.form.to_dict()
     data['company_id'] = company_id
     
+    # Handle service_plan_ids array - form data flattens arrays
+    # request.form.to_dict() only returns the first value for duplicate keys
+    service_plan_ids = request.form.getlist('service_plan_ids') or request.form.getlist('service_plan_ids[]')
+    if service_plan_ids:
+        data['service_plan_ids'] = service_plan_ids
+    
     # Validate data first
     validation_errors = await customer_crud.validate_customer_data(data, is_update=True, customer_id=id)
     

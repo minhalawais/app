@@ -707,32 +707,50 @@ def get_enhanced_invoice_by_id(id, company_id, user_role):
         if line_items_list:
             service_plan_name = ', '.join([li.get('description', '') for li in line_items_list if li.get('description')])
         
-        # Fallback: get from CustomerPackage if no line items or empty service_plan_name
-        # ONLY for subscription invoices - for others, we want them to be empty if no distinct items exist
-        if (not service_plan_name or service_plan_name == "N/A" or not line_items_list) and invoice.invoice_type == 'subscription':
+        # Fallback: get from CustomerPackage ONLY if no line items AND no service_plan_name
+        # IMPORTANT: For invoices with line items, use the stored descriptions (they preserve history)
+        # Only for truly legacy invoices with no line items, fall back to current packages
+        if (not service_plan_name or service_plan_name == "N/A") and not line_items_list and invoice.invoice_type == 'subscription':
             try:
-                customer_packages = CustomerPackage.query.filter_by(
-                    customer_id=invoice.customer_id,
-                    is_active=True
-                ).all()
+                # First try: get packages from line items' customer_package_id (preserves history even for inactive packages)
+                if line_items_list:
+                    package_descriptions = []
+                    for li in line_items_list:
+                        cp_id = li.get('customer_package_id')
+                        if cp_id:
+                            # Query WITHOUT is_active filter to get historical package
+                            cp = CustomerPackage.query.get(cp_id)
+                            if cp and cp.service_plan:
+                                plan = cp.service_plan
+                                desc = f"{plan.name} - {plan.speed_mbps}Mbps" if plan.speed_mbps else plan.name
+                                package_descriptions.append(desc)
+                    if package_descriptions:
+                        service_plan_name = ', '.join(package_descriptions)
                 
-                package_line_items = []
-                for cp in customer_packages:
-                    plan = ServicePlan.query.get(cp.service_plan_id)
-                    if plan:
-                        package_line_items.append({
-                            'id': str(cp.id),
-                            'description': f"{plan.name} - {plan.speed_mbps}Mbps" if plan.speed_mbps else plan.name,
-                            'quantity': 1,
-                            'unit_price': float(plan.price) if plan.price else 0,
-                            'discount_amount': 0,
-                            'line_total': float(plan.price) if plan.price else 0
-                        })
-                
-                if package_line_items:
-                    if not line_items_list:
-                        line_items_list = package_line_items
-                    service_plan_name = ', '.join([li.get('description', '') for li in package_line_items])
+                # Last resort: only for truly legacy invoices with no line items at all
+                if not service_plan_name or service_plan_name == "N/A":
+                    customer_packages = CustomerPackage.query.filter_by(
+                        customer_id=invoice.customer_id,
+                        is_active=True
+                    ).all()
+                    
+                    package_line_items = []
+                    for cp in customer_packages:
+                        plan = ServicePlan.query.get(cp.service_plan_id)
+                        if plan:
+                            package_line_items.append({
+                                'id': str(cp.id),
+                                'description': f"{plan.name} - {plan.speed_mbps}Mbps" if plan.speed_mbps else plan.name,
+                                'quantity': 1,
+                                'unit_price': float(plan.price) if plan.price else 0,
+                                'discount_amount': 0,
+                                'line_total': float(plan.price) if plan.price else 0
+                            })
+                    
+                    if package_line_items:
+                        if not line_items_list:
+                            line_items_list = package_line_items
+                        service_plan_name = ', '.join([li.get('description', '') for li in package_line_items])
             except Exception as pkg_error:
                 logger.error(f"Error getting customer packages for invoice {id}: {str(pkg_error)}")
 

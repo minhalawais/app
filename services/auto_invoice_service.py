@@ -111,9 +111,13 @@ def generate_invoice_for_customer(customer, billing_start_date, billing_end_date
             if cp.service_plan:
                 price = float(cp.service_plan.price) if cp.service_plan.price else 0.0
                 subtotal += price
+                # Build comprehensive description for historical preservation
+                desc = cp.service_plan.name
+                if cp.service_plan.speed_mbps:
+                    desc = f"{cp.service_plan.name} - {cp.service_plan.speed_mbps}Mbps"
                 package_details.append({
                     'customer_package_id': cp.id,
-                    'description': cp.service_plan.name,
+                    'description': desc,  # CRITICAL: This is stored for invoice history
                     'unit_price': price,
                     'line_total': price
                 })
