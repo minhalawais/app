@@ -9,7 +9,7 @@ from werkzeug.utils import secure_filename
 logger = logging.getLogger(__name__)
 
 # Base upload folder for company branding assets (logos, favicons)
-UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'uploads', 'companies')
+UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'uploads', 'companies')
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'svg', 'gif', 'webp', 'ico'}
 
 
