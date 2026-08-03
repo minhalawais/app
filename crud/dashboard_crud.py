@@ -1365,10 +1365,11 @@ def get_unified_financial_data(company_id, filters=None):
         return {'error': 'Failed to fetch unified financial data'}
 
 # NEW: Add function to calculate initial balance summary
-def get_initial_balance_summary(company_id, bank_account_id=None):
+def calculate_bank_balances(company_id, bank_account_id=None):
     """
     Calculates the REAL-TIME balance of bank accounts by aggregating actual transactions.
     Formula: Initial + (Customer Payments + Extra Income + Transfers In) - (Expenses + ISP Payments + Transfers Out)
+    Returns a dictionary of {account_id: current_balance} and summary stats.
     """
     try:
         # 1. Fetch valid accounts
@@ -1379,11 +1380,12 @@ def get_initial_balance_summary(company_id, bank_account_id=None):
         
         bank_account_ids = [acc.id for acc in bank_accounts]
         if not bank_account_ids:
-             return {
+            return {
                 'total_initial_balance': 0,
                 'total_current_balance': 0,
                 'accounts_with_balance': 0,
-                'average_balance': 0
+                'average_balance': 0,
+                'balances_map': {}
             }
 
         # Helper to get Sum grouped by account
@@ -1444,6 +1446,7 @@ def get_initial_balance_summary(company_id, bank_account_id=None):
         total_initial_balance = 0
         total_current_balance = 0
         accounts_with_positive_balance = 0
+        balances_map = {}
 
         for acc in bank_accounts:
             # Start with Initial
@@ -1464,6 +1467,9 @@ def get_initial_balance_summary(company_id, bank_account_id=None):
             )
             
             computed_balance = initial + inflow - outflow
+
+            # Store each account's calculated real-time balance for Bank Performance.
+            balances_map[str(acc.id)] = computed_balance
             
             # Aggregates
             total_initial_balance += initial
@@ -1478,7 +1484,8 @@ def get_initial_balance_summary(company_id, bank_account_id=None):
             'total_initial_balance': total_initial_balance,
             'total_current_balance': total_current_balance,
             'accounts_with_balance': accounts_with_positive_balance,
-            'average_balance': round(total_current_balance / len(bank_accounts), 2) if bank_accounts else 0
+            'average_balance': round(total_current_balance / len(bank_accounts), 2) if bank_accounts else 0,
+            'balances_map': balances_map
         }
 
     except Exception as e:
@@ -1489,8 +1496,13 @@ def get_initial_balance_summary(company_id, bank_account_id=None):
             'total_initial_balance': 0,
             'total_current_balance': 0,
             'accounts_with_balance': 0,
-            'average_balance': 0
+            'average_balance': 0,
+            'balances_map': {}
         }
+
+def get_initial_balance_summary(company_id, bank_account_id=None):
+    """Backward-compatible wrapper for the transaction-based balance calculation."""
+    return calculate_bank_balances(company_id, bank_account_id)
 
 def get_financial_kpis(company_id, start_date=None, end_date=None, bank_account_id=None, invoice_status=None, payment_method=None, isp_payment_type=None):
     try:
@@ -2025,6 +2037,10 @@ def get_bank_account_performance(company_id, start_date=None, end_date=None, ban
         expenses_dict = {f"{bn}-{an}": float(v or 0) for bn, an, v in expenses_data}
         extra_income_dict = {f"{bn}-{an}": float(v or 0) for bn, an, v in extra_income_data}
 
+        # Calculate real-time balances independently of the selected date filters.
+        balance_summary = calculate_bank_balances(company_id)
+        real_time_balances = balance_summary.get('balances_map', {})
+
         all_bank_accounts = BankAccount.query.filter_by(company_id=company_id, is_active=True).all()
         performance_data = []
         for account in all_bank_accounts:
@@ -2038,6 +2054,7 @@ def get_bank_account_performance(company_id, start_date=None, end_date=None, ban
             initial_balance = float(account.initial_balance or 0)
             total_flow = collections + extra_income + total_payments
             utilization_rate = ((collections + extra_income) / total_flow * 100) if total_flow > 0 else 0
+            current_balance = real_time_balances.get(str(account.id), 0)
 
             performance_data.append({
                 'bank_name': account.bank_name,
@@ -2049,7 +2066,7 @@ def get_bank_account_performance(company_id, start_date=None, end_date=None, ban
                 'expenses': expenses,
                 'net_flow': net_flow,
                 'initial_balance': initial_balance,
-                'current_balance': float(account.current_balance or 0),
+                'current_balance': float(current_balance),
                 'utilization_rate': round(utilization_rate, 2)
             })
         return performance_data

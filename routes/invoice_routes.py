@@ -81,9 +81,20 @@ def delete_existing_invoice(id):
     current_user_id = get_jwt_identity()
     ip_address = request.remote_addr
     user_agent = request.headers.get('User-Agent')
-    if invoice_crud.delete_invoice(id, company_id, user_role, current_user_id, ip_address, user_agent):
-        return jsonify({'message': 'Invoice deleted successfully'}), 200
-    return jsonify({'message': 'Invoice not found'}), 404
+    try:
+        if invoice_crud.delete_invoice(id, company_id, user_role, current_user_id, ip_address, user_agent):
+            return jsonify({'message': 'Invoice deleted successfully'}), 200
+        return jsonify({'error': 'invoice_not_found', 'message': 'Invoice not found'}), 404
+    except invoice_crud.InvoiceError as e:
+        message = str(e) or 'Unable to delete invoice. Please try again.'
+        status_code = 404 if 'not found' in message.lower() else 400
+        return jsonify({'error': 'invoice_delete_failed', 'message': message}), status_code
+    except Exception:
+        logger.exception("Unexpected error deleting invoice %s", id)
+        return jsonify({
+            'error': 'invoice_delete_failed',
+            'message': 'Unable to delete invoice. Please try again.'
+        }), 500
 
 @main.route('/invoices/<string:id>', methods=['GET'])
 @jwt_required()

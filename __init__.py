@@ -1,4 +1,4 @@
-from flask import Flask
+from flask import Flask, jsonify
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from flask_bcrypt import Bcrypt
@@ -6,6 +6,7 @@ from flask_jwt_extended import JWTManager
 from flask_migrate import Migrate
 from datetime import timedelta
 from flask_mail import Mail
+from werkzeug.exceptions import RequestEntityTooLarge
 
 import os
 
@@ -37,6 +38,13 @@ def create_app():
     migrate.init_app(app, db)
 
     mail.init_app(app)
+
+    @app.errorhandler(RequestEntityTooLarge)
+    def handle_request_entity_too_large(error):
+        return jsonify({
+            'error': 'request_too_large',
+            'message': 'Uploaded files exceed the maximum allowed size'
+        }), 413
 
     with app.app_context():
         from .routes import main

@@ -1,5 +1,16 @@
 from app import db
-from app.models import Invoice, Customer, Payment, ServicePlan, User, CustomerPackage, InvoiceLineItem, InventoryItem
+from app.models import (
+    Invoice,
+    Customer,
+    Payment,
+    ServicePlan,
+    User,
+    CustomerPackage,
+    InvoiceLineItem,
+    InventoryItem,
+    RecoveryTask,
+    WhatsAppMessageQueue,
+)
 from app.utils.logging_utils import log_action
 from app.services.whatsapp_invoice_sender import WhatsAppInvoiceSender
 from app.crud.inventory_crud import log_inventory_transaction
@@ -347,52 +358,77 @@ def delete_invoice(id, company_id, user_role, current_user_id, ip_address, user_
         if not invoice:
             raise ValueError(f"Invoice with id {id} not found")
 
-        # Check for related payments and delete them first
-        payments = Payment.query.filter_by(invoice_id=id).all()
-        if payments:
-            # Delete all related payments
-            for payment in payments:
-                # Log payment deletion
-                payment_old_values = {
+        invoice_id = invoice.id
+        old_values = invoice_to_dict(invoice)
+        payment_logs = []
+
+        payments = Payment.query.filter_by(invoice_id=invoice_id).all()
+        for payment in payments:
+            payment_logs.append({
+                'record_id': payment.id,
+                'old_values': {
                     'id': str(payment.id),
                     'invoice_id': str(payment.invoice_id),
                     'amount': float(payment.amount),
-                    'payment_date': payment.payment_date.isoformat(),
+                    'payment_date': payment.payment_date.isoformat() if payment.payment_date else None,
                     'payment_method': payment.payment_method,
                     'status': payment.status
                 }
-                
+            })
+            db.session.delete(payment)
+
+        InvoiceLineItem.query.filter_by(invoice_id=invoice_id).delete(synchronize_session=False)
+        RecoveryTask.query.filter_by(invoice_id=invoice_id).delete(synchronize_session=False)
+        WhatsAppMessageQueue.query.filter_by(related_invoice_id=invoice_id).update(
+            {'related_invoice_id': None},
+            synchronize_session=False
+        )
+
+        db.session.delete(invoice)
+        db.session.commit()
+
+        for payment_log in payment_logs:
+            try:
                 log_action(
                     current_user_id,
                     'DELETE',
                     'payments',
-                    payment.id,
-                    payment_old_values,
+                    payment_log['record_id'],
+                    payment_log['old_values'],
                     None,
                     ip_address,
                     user_agent,
                     company_id
                 )
-                db.session.delete(payment)
+            except Exception:
+                logger.exception("Audit logging failed after payment %s was deleted with invoice %s", payment_log['record_id'], invoice_id)
+                try:
+                    db.session.rollback()
+                except Exception:
+                    logger.exception("Failed to recover database session after payment delete audit logging failure")
 
-        old_values = invoice_to_dict(invoice)
-
-        db.session.delete(invoice)
-        db.session.commit()
-
-        log_action(
-            current_user_id,
-            'DELETE',
-            'invoices',
-            invoice.id,
-            old_values,
-            None,
-            ip_address,
-            user_agent,
-            company_id
-        )
+        try:
+            log_action(
+                current_user_id,
+                'DELETE',
+                'invoices',
+                invoice_id,
+                old_values,
+                None,
+                ip_address,
+                user_agent,
+                company_id
+            )
+        except Exception:
+            logger.exception("Audit logging failed after invoice %s was deleted", invoice_id)
+            try:
+                db.session.rollback()
+            except Exception:
+                logger.exception("Failed to recover database session after invoice delete audit logging failure")
 
         return True
+    except InvoiceError:
+        raise
     except ValueError as e:
         logger.error(f"Validation error: {str(e)}")
         raise InvoiceError(str(e))

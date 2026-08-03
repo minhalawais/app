@@ -3,13 +3,18 @@ from app.models import User
 from app.utils.logging_utils import log_action
 import uuid
 import os
+import re
 from datetime import datetime
 from decimal import Decimal
-from sqlalchemy.exc import SQLAlchemyError, IntegrityError, DatabaseError
+from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 import logging
 from werkzeug.utils import secure_filename
 
 logger = logging.getLogger(__name__)
+
+
+class DuplicateEmployeeError(Exception):
+    """Raised when an employee conflicts with a unique user field."""
 
 # File upload configuration
 UPLOAD_FOLDER = 'uploads/employees'
@@ -45,6 +50,74 @@ def save_employee_file(file, employee_id, file_type):
     
     # Return relative path for storage in database
     return f"{UPLOAD_FOLDER}/{employee_id}/{filename}"
+
+
+def _remove_employee_files(relative_paths):
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    for relative_path in relative_paths:
+        try:
+            os.remove(os.path.join(project_root, relative_path))
+        except FileNotFoundError:
+            continue
+        except OSError:
+            logger.exception("Failed to remove employee upload %s", relative_path)
+
+
+def normalize_cnic(value):
+    digits = re.sub(r'\D', '', str(value or ''))
+    if len(digits) != 13:
+        raise ValueError("CNIC must be exactly 13 digits")
+    return digits
+
+
+def get_cnic_storage_variants(value):
+    digits = normalize_cnic(value)
+    return {digits, f"{digits[:5]}-{digits[5:12]}-{digits[12:]}"}
+
+
+def normalize_pakistani_mobile(value, field_label):
+    digits = re.sub(r'\D', '', str(value or ''))
+
+    if digits.startswith('0092'):
+        digits = digits[4:]
+    elif digits.startswith('92'):
+        digits = digits[2:]
+    elif digits.startswith('0'):
+        digits = digits[1:]
+
+    if not re.fullmatch(r'3\d{9}', digits):
+        raise ValueError(f"{field_label} must be a valid Pakistani mobile number")
+
+    return f"+92 ({digits[:3]})-{digits[3:]}"
+
+
+def normalize_employee_contact_fields(data):
+    normalized = dict(data)
+    if 'cnic' in normalized and normalized['cnic']:
+        normalized['cnic'] = normalize_cnic(normalized['cnic'])
+
+    contact_fields = {
+        'contact_number': 'Contact number',
+        'emergency_contact': 'Emergency contact',
+        'reference_contact': 'Reference contact',
+    }
+    for field, label in contact_fields.items():
+        if field in normalized and normalized[field]:
+            normalized[field] = normalize_pakistani_mobile(normalized[field], label)
+
+    return normalized
+
+
+def ensure_cnic_available(cnic, employee_id=None):
+    if not hasattr(User, 'query'):
+        return
+
+    query = User.query.filter(User.cnic.in_(get_cnic_storage_variants(cnic)))
+    if employee_id is not None:
+        query = query.filter(User.id != employee_id)
+
+    if query.first():
+        raise DuplicateEmployeeError("Employee with this username, email, or CNIC already exists")
 
 def get_all_employees(company_id, user_role, employee_id):
     try:
@@ -103,15 +176,21 @@ def add_employee(data, files, user_role, current_user_id, ip_address, user_agent
     files: dict with file objects (cnic_image, picture, utility_bill_image, reference_cnic_image)
     """
     try:
-        required_fields = ['company_id', 'username', 'email', 'first_name', 'last_name', 'password', 
+        required_fields = ['company_id', 'username', 'email', 'first_name', 'last_name', 'password', 'role',
                            'contact_number', 'emergency_contact', 'cnic', 'house_address', 'salary',
                            'reference_name', 'reference_contact']
         for field in required_fields:
             if field not in data or not data[field]:
                 raise ValueError(f"Missing required field: {field}")
 
+        data = normalize_employee_contact_fields(data)
+        ensure_cnic_available(data['cnic'])
+
         # Parse salary
-        salary = Decimal(str(data['salary'])) if data.get('salary') else None
+        try:
+            salary = Decimal(str(data['salary'])) if data.get('salary') else None
+        except Exception as e:
+            raise ValueError('Salary must be a valid number') from e
         
         # Parse joining date
         joining_date = None
@@ -142,6 +221,8 @@ def add_employee(data, files, user_role, current_user_id, ip_address, user_agent
         )
         new_employee.set_password(data['password'])
         
+        saved_file_paths = []
+
         # First add without files to get the ID
         db.session.add(new_employee)
         db.session.flush()  # Get the ID without committing
@@ -150,26 +231,37 @@ def add_employee(data, files, user_role, current_user_id, ip_address, user_agent
         if files:
             if 'cnic_image' in files and files['cnic_image']:
                 new_employee.cnic_image = save_employee_file(files['cnic_image'], new_employee.id, 'cnic')
+                saved_file_paths.append(new_employee.cnic_image)
             if 'picture' in files and files['picture']:
                 new_employee.picture = save_employee_file(files['picture'], new_employee.id, 'picture')
+                saved_file_paths.append(new_employee.picture)
             if 'utility_bill_image' in files and files['utility_bill_image']:
                 new_employee.utility_bill_image = save_employee_file(files['utility_bill_image'], new_employee.id, 'utility_bill')
+                saved_file_paths.append(new_employee.utility_bill_image)
             if 'reference_cnic_image' in files and files['reference_cnic_image']:
                 new_employee.reference_cnic_image = save_employee_file(files['reference_cnic_image'], new_employee.id, 'reference_cnic')
+                saved_file_paths.append(new_employee.reference_cnic_image)
         
         db.session.commit()
 
-        log_action(
-            current_user_id,
-            'CREATE',
-            'users',
-            new_employee.id,
-            None,
-            {k: v for k, v in data.items() if k != 'password'},
-            ip_address,
-            user_agent,
-            data['company_id']
-        )
+        try:
+            log_action(
+                current_user_id,
+                'CREATE',
+                'users',
+                new_employee.id,
+                None,
+                {k: v for k, v in data.items() if k != 'password'},
+                ip_address,
+                user_agent,
+                data['company_id']
+            )
+        except Exception:
+            logger.exception("Audit logging failed after employee %s was created", new_employee.id)
+            try:
+                db.session.rollback()
+            except Exception:
+                logger.exception("Failed to recover database session after audit logging failure")
 
         return new_employee, {
             'username': new_employee.username,
@@ -179,10 +271,14 @@ def add_employee(data, files, user_role, current_user_id, ip_address, user_agent
     except IntegrityError as e:
         logger.error(f"Integrity error adding employee: {str(e)}")
         db.session.rollback()
-        raise DatabaseError("Employee with this username, email, or CNIC already exists")
+        if 'saved_file_paths' in locals():
+            _remove_employee_files(saved_file_paths)
+        raise DuplicateEmployeeError("Employee with this username, email, or CNIC already exists")
     except Exception as e:
         logger.error(f"Error adding employee: {str(e)}")
         db.session.rollback()
+        if 'saved_file_paths' in locals():
+            _remove_employee_files(saved_file_paths)
         raise
 
 def update_employee(id, data, files, company_id, user_role, current_user_id, ip_address, user_agent):
@@ -201,6 +297,10 @@ def update_employee(id, data, files, company_id, user_role, current_user_id, ip_
 
         if not employee:
             raise ValueError(f"Employee with id {id} not found")
+
+        data = normalize_employee_contact_fields(data)
+        if data.get('cnic'):
+            ensure_cnic_available(data['cnic'], employee.id)
 
         old_values = {
             'username': employee.username,
@@ -284,6 +384,10 @@ def update_employee(id, data, files, company_id, user_role, current_user_id, ip_
         )
 
         return employee
+    except IntegrityError as e:
+        logger.error(f"Integrity error updating employee {id}: {str(e)}")
+        db.session.rollback()
+        raise DuplicateEmployeeError("Employee with this username, email, or CNIC already exists")
     except Exception as e:
         logger.error(f"Error updating employee {id}: {str(e)}")
         db.session.rollback()
@@ -388,4 +492,13 @@ def check_email_availability(email):
         return existing_user is None
     except Exception as e:
         logger.error(f"Error checking email availability: {str(e)}")
+        raise
+
+def check_cnic_availability(cnic):
+    try:
+        cnic_variants = get_cnic_storage_variants(cnic)
+        existing_user = User.query.filter(User.cnic.in_(cnic_variants)).first()
+        return existing_user is None
+    except Exception as e:
+        logger.error(f"Error checking CNIC availability: {str(e)}")
         raise

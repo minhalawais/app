@@ -1,4 +1,4 @@
-from flask import jsonify, request
+from flask import jsonify, request, current_app
 from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 from . import main
 from ..crud import employee_crud
@@ -33,7 +33,7 @@ def add_new_employee():
             'reference_cnic_image': request.files.get('reference_cnic_image'),
         }
     else:
-        data = request.json or {}
+        data = request.get_json(silent=True) or {}
         files = {}
     
     data['company_id'] = company_id
@@ -46,9 +46,18 @@ def add_new_employee():
             'credentials': credentials
         }), 201
     except ValueError as e:
-        return jsonify({'error': str(e)}), 400
-    except Exception as e:
-        return jsonify({'error': 'Failed to add employee', 'message': str(e)}), 500
+        return jsonify({'error': 'validation_error', 'message': str(e)}), 400
+    except employee_crud.DuplicateEmployeeError:
+        return jsonify({
+            'error': 'duplicate_employee',
+            'message': 'Employee with this username, email, or CNIC already exists'
+        }), 409
+    except Exception:
+        current_app.logger.exception('Employee creation failed')
+        return jsonify({
+            'error': 'employee_creation_failed',
+            'message': 'Unable to add employee. Please try again.'
+        }), 500
 
 @main.route('/employees/update/<string:id>', methods=['PUT'])
 @jwt_required()
@@ -79,9 +88,18 @@ def update_existing_employee(id):
             return jsonify({'message': 'Employee updated successfully'}), 200
         return jsonify({'message': 'Employee not found'}), 404
     except ValueError as e:
-        return jsonify({'error': str(e)}), 400
-    except Exception as e:
-        return jsonify({'error': 'Failed to update employee', 'message': str(e)}), 500
+        return jsonify({'error': 'validation_error', 'message': str(e)}), 400
+    except employee_crud.DuplicateEmployeeError:
+        return jsonify({
+            'error': 'duplicate_employee',
+            'message': 'Employee with this username, email, or CNIC already exists'
+        }), 409
+    except Exception:
+        current_app.logger.exception('Employee update failed')
+        return jsonify({
+            'error': 'employee_update_failed',
+            'message': 'Unable to update employee. Please try again.'
+        }), 500
 
 @main.route('/employees/delete/<string:id>', methods=['DELETE'])
 @jwt_required()
@@ -143,6 +161,18 @@ def verify_email():
     
     is_available = employee_crud.check_email_availability(email)
     return jsonify({'available': is_available}), 200
+
+@main.route('/employees/check-cnic/<string:cnic>', methods=['GET'])
+@jwt_required()
+def check_employee_cnic(cnic):
+    try:
+        is_available = employee_crud.check_cnic_availability(cnic)
+        return jsonify({
+            'available': is_available,
+            'message': 'CNIC is available' if is_available else 'CNIC is already in use'
+        }), 200
+    except ValueError as e:
+        return jsonify({'error': 'validation_error', 'message': str(e)}), 400
 
 # ============ Employee Ledger & Commission Routes ============
 
