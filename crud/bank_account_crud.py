@@ -20,8 +20,8 @@ def get_all_bank_accounts(company_id, user_role, active_only=False):
         if user_role != 'super_admin':
             query = query.filter_by(company_id=company_id)
         
-        # Apply active filter if requested or forced by role
-        if active_only or user_role in ['auditor', 'company_owner', 'employee']:
+        # Apply active filter if explicitly requested (e.g. for payment dropdowns)
+        if active_only:
             query = query.filter_by(is_active=True)
             
         bank_accounts = query.order_by(BankAccount.created_at.desc()).all()
