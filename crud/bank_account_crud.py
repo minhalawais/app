@@ -98,9 +98,7 @@ def update_bank_account(id, data, company_id, user_role, current_user_id, ip_add
     try:
         if user_role == 'super_admin':
             bank_account = BankAccount.query.get(id)
-        elif user_role == 'auditor':
-            bank_account = BankAccount.query.filter_by(id=id, is_active=True, company_id=company_id).first()
-        elif user_role == 'company_owner':
+        else:
             bank_account = BankAccount.query.filter_by(id=id, company_id=company_id).first()
 
         if not bank_account:
@@ -162,9 +160,7 @@ def delete_bank_account(id, company_id, user_role, current_user_id, ip_address, 
     try:
         if user_role == 'super_admin':
             bank_account = BankAccount.query.get(id)
-        elif user_role == 'auditor':
-            bank_account = BankAccount.query.filter_by(id=id, is_active=True, company_id=company_id).first()
-        elif user_role == 'company_owner':
+        else:
             bank_account = BankAccount.query.filter_by(id=id, company_id=company_id).first()
 
         if not bank_account:

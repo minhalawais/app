@@ -343,12 +343,32 @@ def get_public_payment_details(invoice_id):
 @main.route('/public/bank-accounts/list', methods=['GET'])
 def get_public_bank_accounts():
     """
-    Public endpoint to get bank account information for payments
+    Public endpoint to get bank account information for payments.
+    Filters accounts to only the company that issued the invoice.
     """
     try:
-        from app.models import BankAccount
-        accounts = BankAccount.query.filter(BankAccount.is_active == True).all()
-        
+        from app.models import BankAccount, Invoice
+
+        invoice_id = request.args.get('invoice_id')
+
+        if not invoice_id:
+            return jsonify([]), 200
+
+        # Resolve the company that owns this invoice
+        invoice = Invoice.query.filter(
+            Invoice.id == invoice_id,
+            Invoice.is_active == True
+        ).first()
+
+        if not invoice:
+            return jsonify({'error': 'Invoice not found'}), 404
+
+        # Only return active bank accounts belonging to that company
+        accounts = BankAccount.query.filter(
+            BankAccount.company_id == invoice.company_id,
+            BankAccount.is_active == True
+        ).all()
+
         return jsonify([{
             'id': str(account.id),
             'bank_name': account.bank_name,
@@ -357,10 +377,11 @@ def get_public_bank_accounts():
             'iban': account.iban,
             'branch_code': account.branch_code
         } for account in accounts]), 200
-        
+
     except Exception as e:
         logger.error(f"Error fetching public bank accounts: {str(e)}")
         return jsonify({'error': 'Failed to fetch bank accounts'}), 500
+
 
 @main.route('/invoices/page', methods=['GET'])
 @jwt_required()
